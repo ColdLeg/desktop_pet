@@ -1,0 +1,26 @@
+{
+    "name": "desktop_pet",
+    "display_name": "MoFox 桌宠",
+    "version": "0.1.0",
+    "description": "MoFox 桌宠插件 - 将桌面桌宠接入 MoFox 聊天流",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "adapter",
+            "component_name": "desktop_pet_adapter",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0",
+    "python_dependencies": [
+        "PySide6>=6.6.0",
+        "psutil>=5.9.0",
+        "pyperclip>=1.8.2"
+    ],
+    "dependencies_required": true
+}
