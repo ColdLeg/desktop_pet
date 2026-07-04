@@ -178,10 +178,16 @@ class ChatWindow(QWidget):
         ) if config else False
 
         self.setWindowTitle(self.WIN_TITLE)
-        win_h = self.WIN_HEIGHT_FULL if self._show_messages else self.WIN_HEIGHT
-        self.setFixedSize(self.WIN_WIDTH, win_h)
+        # 按主屏面积 1.8% 计算缩放因子（与 PetWindow 同算法，基准 200x200）
+        # PetWindow 用 1%，ChatWindow 略大一些
+        self._scale = self._compute_scale(0.018)
+        win_h_base = self.WIN_HEIGHT_FULL if self._show_messages else self.WIN_HEIGHT
+        self._win_w = int(self.WIN_WIDTH * self._scale)
+        self._win_h = int(win_h_base * self._scale)
+        self.setFixedSize(self._win_w, self._win_h)
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -201,6 +207,37 @@ class ChatWindow(QWidget):
                 self._sound_effect.setVolume(0.8)
                 self._sound_effect.setLoopCount(1)
 
+    # ---- 屏幕比例尺寸 ----
+
+    BASE_PET_SIDE = 200  # 与 PetWindow 默认边长一致，用作缩放基准
+
+    @classmethod
+    def _compute_scale(cls, area_ratio: float) -> float:
+        """按主屏可用面积比例计算缩放因子。
+
+        factor = sqrt(screen_w * screen_h * ratio) / BASE_PET_SIDE
+
+        Args:
+            area_ratio: 占屏幕面积的比例，与 PetWindow 保持一致。
+
+        Returns:
+            缩放因子（无屏幕信息时返回 1.0）。
+        """
+        from PySide6.QtWidgets import QApplication
+        import math
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return 1.0
+        geo = screen.availableGeometry()
+        if geo.width() <= 0 or geo.height() <= 0:
+            return 1.0
+        area = geo.width() * geo.height() * area_ratio
+        if area <= 0:
+            return 1.0
+        side = math.sqrt(area)
+        # 限制最小缩放因子，避免子控件被压缩到不可见
+        return max(0.5, side / cls.BASE_PET_SIDE)
+
     def _build_ui(self) -> None:
         """构建聊天界面布局。"""
         main_layout = QVBoxLayout(self)
@@ -217,10 +254,10 @@ class ChatWindow(QWidget):
         # --- 标题栏 ---
         self._title_bar = QFrame()
         self._title_bar.setObjectName("title_bar")
-        self._title_bar.setFixedHeight(36)
+        self._title_bar.setFixedHeight(int(36 * self._scale))
         title_layout = QHBoxLayout(self._title_bar)
-        title_layout.setContentsMargins(12, 0, 8, 0)
-        title_layout.setSpacing(8)
+        title_layout.setContentsMargins(int(12 * self._scale), 0, int(8 * self._scale), 0)
+        title_layout.setSpacing(int(8 * self._scale))
 
         title_text = (
             getattr(self._config.chat, "pet_name", "MoFox 桌宠")
@@ -228,13 +265,23 @@ class ChatWindow(QWidget):
         )
         self._title_label = QLabel(title_text)
         self._title_label.setObjectName("title_label")
+        from PySide6.QtGui import QFont
+        title_font = QFont()
+        title_font.setPointSize(max(9, int(14 * self._scale)))
+        title_font.setBold(True)
+        self._title_label.setFont(title_font)
         title_layout.addWidget(self._title_label)
         title_layout.addStretch()
 
         self._close_btn = QPushButton("✕")
         self._close_btn.setObjectName("close_btn")
-        self._close_btn.setFixedSize(28, 28)
+        self._close_btn.setFixedSize(int(28 * self._scale), int(28 * self._scale))
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 字号随缩放调整（基准 16px），用 font 而非内联 stylesheet 以保留 QSS 伪类
+        from PySide6.QtGui import QFont
+        close_font = QFont()
+        close_font.setPointSize(max(10, int(16 * self._scale)))
+        self._close_btn.setFont(close_font)
         self._close_btn.clicked.connect(self.hide)
         title_layout.addWidget(self._close_btn)
 
@@ -253,8 +300,9 @@ class ChatWindow(QWidget):
             scroll_content = QWidget()
             scroll_content.setObjectName("scroll_content")
             self._message_layout = QVBoxLayout(scroll_content)
-            self._message_layout.setContentsMargins(10, 10, 10, 10)
-            self._message_layout.setSpacing(8)
+            m = int(10 * self._scale)
+            self._message_layout.setContentsMargins(m, m, m, m)
+            self._message_layout.setSpacing(int(8 * self._scale))
             self._message_layout.addStretch()
 
             self._message_scroll.setWidget(scroll_content)
@@ -263,10 +311,11 @@ class ChatWindow(QWidget):
         # --- 输入区 ---
         input_bar = QFrame()
         input_bar.setObjectName("input_bar")
-        input_bar.setFixedHeight(52)
+        input_bar.setFixedHeight(int(52 * self._scale))
         input_layout = QHBoxLayout(input_bar)
-        input_layout.setContentsMargins(10, 0, 10, 0)
-        input_layout.setSpacing(8)
+        m2 = int(10 * self._scale)
+        input_layout.setContentsMargins(m2, 0, m2, 0)
+        input_layout.setSpacing(int(8 * self._scale))
 
         self._input = QLineEdit()
         self._input.setObjectName("input_field")
@@ -275,7 +324,7 @@ class ChatWindow(QWidget):
 
         self._send_button = QPushButton("发送")
         self._send_button.setObjectName("send_btn")
-        self._send_button.setFixedSize(64, 36)
+        self._send_button.setFixedSize(int(64 * self._scale), int(36 * self._scale))
         self._send_button.setCursor(Qt.CursorShape.PointingHandCursor)
         input_layout.addWidget(self._send_button)
 
@@ -287,8 +336,20 @@ class ChatWindow(QWidget):
         self._input.returnPressed.connect(self._on_send)
         self._send_button.clicked.connect(self._on_send)
 
-        # --- 应用 QSS ---
-        self.setStyleSheet(self.QSS)
+        # --- 应用 QSS（字号、padding 按缩放因子调整）---
+        qss = self.QSS
+        s = self._scale
+        qss = qss.replace("font-size: 14px;", f"font-size: {max(9, int(14 * s))}px;")
+        qss = qss.replace("font-size: 16px;", f"font-size: {max(10, int(16 * s))}px;")
+        qss = qss.replace("font-size: 12px;", f"font-size: {max(8, int(12 * s))}px;")
+        qss = qss.replace("font-size: 11px;", f"font-size: {max(8, int(11 * s))}px;")
+        qss = qss.replace("padding: 8px 12px;", f"padding: {int(8 * s)}px {int(12 * s)}px;")
+        qss = qss.replace("border-radius: 12px;", f"border-radius: {int(12 * s)}px;")
+        qss = qss.replace("border-radius: 18px;", f"border-radius: {int(18 * s)}px;")
+        qss = qss.replace("border-radius: 16px;", f"border-radius: {int(16 * s)}px;")
+        qss = qss.replace("border-radius: 6px;", f"border-radius: {int(6 * s)}px;")
+        qss = qss.replace("border-radius: 8px;", f"border-radius: {int(8 * s)}px;")
+        self.setStyleSheet(qss)
 
     def _on_send(self) -> None:
         """处理发送动作：发射消息信号并清空输入框。"""

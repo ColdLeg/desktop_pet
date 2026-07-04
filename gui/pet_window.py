@@ -16,14 +16,113 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPixmap
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from .dialog_box import DialogBox
 
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
+
+
+class SvgPetLabel(QLabel):
+    """用 QSvgRenderer 绘制 SVG 的 QLabel 子类。
+
+    兼容现有调用方（`pixmap()`/`setPixmap()`）：
+    - setPixmap(svg_bytes) 接收 SVG 字节流并加载到 QSvgRenderer
+    - pixmap() 返回一个 QSize 占位对象供现有定位逻辑使用，
+      其中 width/height 与 widget 尺寸一致（SVG 矢量图无固定像素尺寸）
+    - paintEvent 用 QSvgRenderer 渲染到 widget 的物理像素，
+      在高 DPI 下保持锐利
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._svg_renderer: QSvgRenderer | None = None
+        self._fallback_pixmap: QPixmap | None = None
+        self._logical_size: QSize = QSize(0, 0)
+
+    def setPixmap(self, source: bytes | QPixmap) -> None:  # type: ignore[override]
+        """接收 SVG 字节流或 QPixmap 兜底图。
+
+        Args:
+            source: SVG 文件的字节流，或一张 QPixmap（兜底/占位用）。
+        """
+        if isinstance(source, (bytes, bytearray)):
+            renderer = QSvgRenderer(bytes(source))
+            if renderer.isValid():
+                self._svg_renderer = renderer
+                self._fallback_pixmap = None
+                self.update()
+                return
+            # SVG 无效则丢弃
+            self._svg_renderer = None
+
+        if isinstance(source, QPixmap):
+            self._svg_renderer = None
+            self._fallback_pixmap = source
+            self.update()
+            return
+
+        self._svg_renderer = None
+        self._fallback_pixmap = None
+        self.update()
+
+    def pixmap(self) -> QPixmap:  # type: ignore[override]
+        """返回占位 QPixmap，尺寸与当前 widget 逻辑尺寸一致。
+
+        现有 _position_dialog() 通过 pixmap().width()/height() 计算
+        居中偏移；SVG 矢量图填满整个 label，因此返回 widget 尺寸即可。
+        """
+        if self._fallback_pixmap is not None and not self._fallback_pixmap.isNull():
+            return self._fallback_pixmap
+        # SVG 模式：返回与 widget 同尺寸的空 pixmap，仅为定位逻辑服务
+        return QPixmap(self._logical_size)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        self._logical_size = self.size()
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        """用 QSvgRenderer 渲染到 widget 物理像素。"""
+        if self._svg_renderer is not None:
+            painter = QPainter(self)
+            # 计算 aspect ratio 保持的居中目标矩形
+            w = max(1, self.width())
+            h = max(1, self.height())
+            viewBox = self._svg_renderer.defaultSize()
+            vw = max(1, viewBox.width())
+            vh = max(1, viewBox.height())
+            scale = min(w / vw, h / vh)
+            dw = int(vw * scale)
+            dh = int(vh * scale)
+            dx = (w - dw) // 2
+            dy = (h - dh) // 2
+            self._svg_renderer.render(painter, QRect(dx, dy, dw, dh))
+            return
+
+        if self._fallback_pixmap is not None and not self._fallback_pixmap.isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            w = max(1, self.width())
+            h = max(1, self.height())
+            pm = self._fallback_pixmap.scaled(
+                w, h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._paint_pixmap_centered(painter, pm)
+            return
+
+        super().paintEvent(event)
+
+    def _paint_pixmap_centered(self, painter: QPainter, pm: QPixmap) -> None:
+        x = (self.width() - pm.width()) // 2
+        y = (self.height() - pm.height()) // 2
+        painter.drawPixmap(x, y, pm)
+
 
 class PetWindow(QWidget):
     """主宠物窗口——透明、可拖拽、置顶。"""
@@ -65,6 +164,10 @@ class PetWindow(QWidget):
             self._normal1_image = ""
             self._normal2_image = ""
 
+        # 按主屏面积 1% 重新计算窗口尺寸（覆盖配置值，保证跨分辨率观感一致）
+        # area = W * H * 0.01，正方形边长 = sqrt(area)
+        self._apply_screen_area_ratio(0.01)
+
         # --- 拖拽状态 ---
         self._drag_position: QPoint | None = None
 
@@ -75,12 +178,38 @@ class PetWindow(QWidget):
         # --- 构建 ---
         self._build_window()
 
+    # ---- 屏幕比例尺寸 ----
+
+    def _apply_screen_area_ratio(self, ratio: float) -> None:
+        """按主屏可用面积的指定比例重新计算窗口边长（正方形）。
+
+        area = screen_w * screen_h * ratio
+        side = sqrt(area)  # 取整数像素
+
+        Args:
+            ratio: 占屏幕面积的比例，例如 0.01 表示 1%。
+        """
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return  # 无屏幕信息，保留配置值
+        geo = screen.availableGeometry()
+        if geo.width() <= 0 or geo.height() <= 0:
+            return
+        area = geo.width() * geo.height() * ratio
+        if area <= 0:
+            return
+        import math
+        side = max(64, int(math.sqrt(area)))  # 不小于 64px
+        self._win_w = side
+        self._win_h = side
+
     # ---- 窗口设置 ----
 
     def _build_window(self) -> None:
         """构建窗口和子控件。"""
         # 窗口标志
-        flags = Qt.WindowType.Window
+        # 使用 Qt.WindowType.Tool：窗口不进入任务栏，但保留托盘图标
+        flags = Qt.WindowType.Tool
         if self.FRAMELESS:
             flags |= Qt.WindowType.FramelessWindowHint
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -98,8 +227,8 @@ class PetWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # 宠物图片标签
-        self._pet_label = QLabel(self)
+        # 宠物图片标签（支持 SVG 矢量渲染，高 DPI 下保持锐利）
+        self._pet_label = SvgPetLabel(self)
         self._pet_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._load_pet_image()
         layout.addWidget(self._pet_label)
@@ -109,7 +238,11 @@ class PetWindow(QWidget):
         self._position_dialog()
 
     def _load_pet_image(self) -> None:
-        """加载并缩放宠物角色图片。"""
+        """加载并显示宠物角色图片。
+
+        SVG 文件用 QSvgRenderer 矢量渲染（高 DPI 下保持锐利）；
+        其它位图格式走 QPixmap 路径作为兼容兜底。
+        """
         # 优先尝试 normal1，然后使用 default_image 作为后备
         img_path = self._normal1_image or self._default_image
         path = Path(img_path)
@@ -118,22 +251,34 @@ class PetWindow(QWidget):
         else:
             full_path = path
 
-        pixmap = QPixmap(str(full_path))
-        if pixmap.isNull():
-            # 后备方案：创建占位图
-            pixmap = QPixmap(self._win_w, self._win_h)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            self._pet_label.setText("\U0001F431")
-            self._pet_label.setStyleSheet("font-size: 72px; color: white;")
+        suffix = full_path.suffix.lower()
+        if suffix == ".svg" and full_path.exists():
+            # SVG 矢量渲染
+            with open(full_path, "rb") as f:
+                svg_bytes = f.read()
+            self._pet_label.setText("")
+            self._pet_label.setStyleSheet("")
+            self._pet_label.setPixmap(svg_bytes)
         else:
-            # 缩放到适应窗口，保持宽高比
-            scaled = pixmap.scaled(
-                self._win_w,
-                self._win_h,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._pet_label.setPixmap(scaled)
+            # 位图路径（兼容旧配置）
+            pixmap = QPixmap(str(full_path))
+            if pixmap.isNull():
+                # 后备方案：创建占位图
+                pixmap = QPixmap(self._win_w, self._win_h)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                self._pet_label.setText("\U0001F431")
+                self._pet_label.setStyleSheet("font-size: 72px; color: white;")
+            else:
+                # 缩放到适应窗口，保持宽高比
+                scaled = pixmap.scaled(
+                    self._win_w,
+                    self._win_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._pet_label.setText("")
+                self._pet_label.setStyleSheet("")
+                self._pet_label.setPixmap(scaled)
 
         self._pet_label.adjustSize()
 

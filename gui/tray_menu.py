@@ -15,8 +15,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QAction, QIcon, QPixmap
+from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QMessageBox
 
 if TYPE_CHECKING:
@@ -111,17 +112,54 @@ class TrayManager(QObject):
     def _create_icon(self) -> QIcon:
         """创建托盘图标。
 
-        尝试从配置的 default_image 加载；回退到空图标。
+        SVG 走矢量渲染，位图走 QPixmap 兜底；失败则返回空图标。
 
         Returns:
             QIcon 实例。
         """
         icon_path = self._resolve_icon_path()
         if icon_path:
-            pixmap = QPixmap(str(icon_path))
-            if not pixmap.isNull():
-                return QIcon(pixmap)
+            suffix = icon_path.lower().rsplit(".", 1)[-1] if "." in icon_path else ""
+            if suffix == "svg":
+                icon = QIcon()
+                # 多档尺寸让 QIcon 按需选择，避免高 DPI 下模糊
+                for px in (16, 24, 32, 48, 64):
+                    pm = self._render_svg_to_pixmap(icon_path, px)
+                    if pm and not pm.isNull():
+                        icon.addPixmap(pm, QIcon.Mode.Normal, QIcon.State.Off)
+                if not icon.isNull():
+                    return icon
+            else:
+                pixmap = QPixmap(str(icon_path))
+                if not pixmap.isNull():
+                    return QIcon(pixmap)
         return QIcon()
+
+    @staticmethod
+    def _render_svg_to_pixmap(path: str, size_px: int) -> QPixmap | None:
+        """将 SVG 文件渲染为指定物理像素的 QPixmap。
+
+        Args:
+            path: SVG 文件绝对路径。
+            size_px: 目标像素尺寸（宽=高）。
+
+        Returns:
+            QPixmap 或 None（渲染失败时）。
+        """
+        try:
+            renderer = QSvgRenderer(path)
+            if not renderer.isValid():
+                return None
+            pm = QPixmap(size_px, size_px)
+            pm.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pm)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            renderer.render(painter)
+            painter.end()
+            return pm
+        except Exception:
+            return None
 
     def _resolve_icon_path(self) -> str | None:
         """从配置的 default_image 解析托盘图标路径。

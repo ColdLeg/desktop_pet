@@ -31,8 +31,8 @@ class DesktopPetConfig(BaseConfig):
         pet_width: int = Field(default=200, description="桌宠宽度", label="宽度", tag="performance", ge=64, le=1024)
         pet_height: int = Field(default=200, description="桌宠高度", label="高度", tag="performance", ge=64, le=1024)
         default_image: str = Field(
-            default="assets/default_pet.png",
-            description="默认图片路径（兜底，相对于插件目录）",
+            default="assets/default_pet.svg",
+            description="默认图片路径（兜底，相对于插件目录；支持 SVG 矢量图，推荐使用 SVG 以获得高 DPI 清晰度）",
             label="默认图片",
             tag="file",
         )
