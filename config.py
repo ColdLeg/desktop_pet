@@ -96,6 +96,80 @@ class DesktopPetConfig(BaseConfig):
             label="显示消息气泡",
             tag="general",
         )
+        user_qq_id: str = Field(
+            default="",
+            description="用户 QQ 号（填了用此 QQ 号作 user_id 隔离上下文，不填用 local_user）",
+            label="用户 QQ 号",
+            tag="user",
+        )
+        chat_position_mode: str = Field(
+            default="independent",
+            description="聊天窗口位置模式：independent=独立不跟随桌宠；follow=拖动桌宠时按偏移跟随",
+            label="位置模式",
+            tag="general",
+        )
+        persist_chat_offset: bool = Field(
+            default=False,
+            description="是否持久化聊天窗口相对桌宠的偏移（重启后恢复）",
+            label="持久化偏移",
+            tag="general",
+        )
+        chat_offset_x: int = Field(
+            default=0,
+            description="聊天窗口相对桌宠的 X 偏移",
+            label="偏移 X",
+            tag="general",
+        )
+        chat_offset_y: int = Field(
+            default=0,
+            description="聊天窗口相对桌宠的 Y 偏移",
+            label="偏移 Y",
+            tag="general",
+        )
+
+    @config_section("screen_watcher", title="屏幕监控", tag="ai")
+    class ScreenWatcherSection(SectionBase):
+        """屏幕监控配置"""
+        enabled: bool = Field(
+            default=False,
+            description="启用定时截图主动监控",
+            label="启用截图监控",
+            tag="ai",
+        )
+        interval: int = Field(
+            default=30,
+            description="截图间隔（秒，最小 5）",
+            label="截图间隔",
+            tag="timer",
+            ge=5,
+        )
+        vlm_prompt: str = Field(
+            default="请描述当前屏幕画面中用户可能在做什么，以便桌宠决定是否主动搭话。",
+            description="VLM 识别提示词",
+            label="VLM 提示词",
+            tag="ai",
+            input_type="textarea",
+            rows=3,
+        )
+        snapshot_dir: str = Field(
+            default="data/desktop_pet/snapshots",
+            description="截图保存目录",
+            label="截图目录",
+            tag="file",
+        )
+        max_snapshots_before_purge: int = Field(
+            default=50,
+            description="累计截图张数上限，达到后批量删除全部并重新累计",
+            label="清理阈值",
+            tag="performance",
+            ge=1,
+        )
+        group_id: str = Field(
+            default="desktop_pet_screenshot",
+            description="截图消息伪装的群聊 ID（同一 ID 复用同一对话流）",
+            label="群聊 ID",
+            tag="ai",
+        )
 
     @config_section("proactive", title="主动聊天", tag="ai")
     class ProactiveSection(SectionBase):
@@ -118,3 +192,4 @@ class DesktopPetConfig(BaseConfig):
     clipboard: ClipboardSection = Field(default_factory=ClipboardSection)
     chat: ChatSection = Field(default_factory=ChatSection)
     proactive: ProactiveSection = Field(default_factory=ProactiveSection)
+    screen_watcher: ScreenWatcherSection = Field(default_factory=ScreenWatcherSection)

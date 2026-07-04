@@ -39,9 +39,12 @@ class TrayManager(QObject):
     action_show = Signal()
     action_hide = Signal()
     action_chat = Signal()
+    action_chat_hide = Signal()
     action_toggle_daynight = Signal()
     action_show_info = Signal()
     action_quit = Signal()
+    action_set_opacity = Signal(float)
+    action_set_chat_position_mode = Signal(str)
 
     # 硬编码托盘属性
     TOOLTIP = "MoFox 桌面宠物"
@@ -77,7 +80,23 @@ class TrayManager(QObject):
         self._tray_icon.setToolTip(self.TOOLTIP)
 
         menu = QMenu()
+        self.build_menu(menu, with_quit_confirm=True)
 
+        self._tray_icon.setContextMenu(menu)
+        self._tray_icon.activated.connect(self._on_tray_activated)
+
+    def build_menu(self, menu: QMenu, *, with_quit_confirm: bool = True) -> None:
+        """把共用菜单项填入指定 menu。
+
+        托盘菜单和桌宠右键菜单都复用此方法，保证菜单项一致。
+        子菜单：透明度、Pet/Chat 也一并加入。
+
+        Args:
+            menu: 要填充的 QMenu。
+            with_quit_confirm: 退出时是否弹确认对话框（托盘场景通常需要，
+                右键桌宠场景也可保持一致）。
+        """
+        # 显示/隐藏宠物
         self._show_action = QAction("显示宠物", self)
         self._show_action.triggered.connect(self.action_show.emit)
         menu.addAction(self._show_action)
@@ -86,12 +105,59 @@ class TrayManager(QObject):
         self._hide_action.triggered.connect(self.action_hide.emit)
         menu.addAction(self._hide_action)
 
+        # 聊天
         chat_action = QAction("聊天...", self)
         chat_action.triggered.connect(self.action_chat.emit)
         menu.addAction(chat_action)
 
+        hide_chat_action = QAction("隐藏聊天窗口", self)
+        hide_chat_action.triggered.connect(self.action_chat_hide.emit)
+        menu.addAction(hide_chat_action)
+
         menu.addSeparator()
 
+        # 透明度子菜单
+        opacity_menu = menu.addMenu("透明度")
+        for pct in (25, 50, 75, 100):
+            act = QAction(f"{pct}%", opacity_menu)
+            act.triggered.connect(lambda checked=False, p=pct: self.action_set_opacity.emit(p / 100.0))
+            opacity_menu.addAction(act)
+
+        # Pet/Chat 子菜单
+        petchat_menu = menu.addMenu("Pet/Chat")
+        pet_show = QAction("显示桌宠", petchat_menu)
+        pet_show.triggered.connect(self.action_show.emit)
+        petchat_menu.addAction(pet_show)
+        pet_hide = QAction("隐藏桌宠", petchat_menu)
+        pet_hide.triggered.connect(self.action_hide.emit)
+        petchat_menu.addAction(pet_hide)
+        petchat_menu.addSeparator()
+        chat_show = QAction("显示聊天", petchat_menu)
+        chat_show.triggered.connect(self.action_chat.emit)
+        petchat_menu.addAction(chat_show)
+        chat_hide = QAction("隐藏聊天", petchat_menu)
+        chat_hide.triggered.connect(self.action_chat_hide.emit)
+        petchat_menu.addAction(chat_hide)
+        petchat_menu.addSeparator()
+        # 聊天位置模式
+        mode_independent = QAction("聊天独立位置", petchat_menu)
+        mode_independent.setCheckable(True)
+        mode_independent.setChecked(self._current_chat_position_mode() == "independent")
+        mode_independent.triggered.connect(
+            lambda checked=False: self.action_set_chat_position_mode.emit("independent")
+        )
+        petchat_menu.addAction(mode_independent)
+        mode_follow = QAction("聊天跟随桌宠", petchat_menu)
+        mode_follow.setCheckable(True)
+        mode_follow.setChecked(self._current_chat_position_mode() == "follow")
+        mode_follow.triggered.connect(
+            lambda checked=False: self.action_set_chat_position_mode.emit("follow")
+        )
+        petchat_menu.addAction(mode_follow)
+
+        menu.addSeparator()
+
+        # 日夜/系统信息
         daynight_action = QAction("切换日/夜模式", self)
         daynight_action.triggered.connect(self.action_toggle_daynight.emit)
         menu.addAction(daynight_action)
@@ -102,12 +168,24 @@ class TrayManager(QObject):
 
         menu.addSeparator()
 
+        # 退出
         quit_action = QAction("退出", self)
-        quit_action.triggered.connect(self._on_quit)
+        if with_quit_confirm:
+            quit_action.triggered.connect(self._on_quit)
+        else:
+            quit_action.triggered.connect(self.action_quit.emit)
+            quit_action.triggered.connect(QApplication.quit)
         menu.addAction(quit_action)
 
-        self._tray_icon.setContextMenu(menu)
-        self._tray_icon.activated.connect(self._on_tray_activated)
+    def _current_chat_position_mode(self) -> str:
+        """读取当前聊天位置模式配置。"""
+        try:
+            if self._config and getattr(self._config, "chat", None):
+                mode = getattr(self._config.chat, "chat_position_mode", "independent")
+                return mode if mode in ("independent", "follow") else "independent"
+        except Exception:
+            pass
+        return "independent"
 
     def _create_icon(self) -> QIcon:
         """创建托盘图标。

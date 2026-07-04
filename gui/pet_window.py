@@ -14,12 +14,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import QGuiApplication, QMouseEvent, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QVBoxLayout, QWidget
 
 from .dialog_box import DialogBox
 
@@ -135,6 +135,7 @@ class PetWindow(QWidget):
 
     chat_requested = Signal()
     pet_moved = Signal()
+    pet_moved_delta = Signal(QPoint)
 
     def __init__(
         self,
@@ -174,6 +175,9 @@ class PetWindow(QWidget):
         # --- 控件 ---
         self._pet_label: QLabel | None = None
         self._dialog_box: DialogBox | None = None
+
+        # --- 右键菜单关联的 TrayManager（由外部 set_tray_manager 注入）---
+        self._tray_manager: Any = None
 
         # --- 构建 ---
         self._build_window()
@@ -318,7 +322,9 @@ class PetWindow(QWidget):
         dialog_w = self._dialog_box.width()
         dialog_h = self._dialog_box.height()
 
-        screen = QApplication.primaryScreen()
+        screen = QGuiApplication.screenAt(self.geometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
         if screen:
             avail = screen.availableGeometry()
             right_space = avail.right() - global_top_right.x()
@@ -354,14 +360,16 @@ class PetWindow(QWidget):
         if self._dialog_box:
             self._dialog_box.hide_immediately()
 
-    def position_chat_window(self, chat_window: QWidget) -> None:
+    def position_chat_window_default(self, chat_window: QWidget) -> None:
         """将聊天窗口定位到桌宠上下方（下方优先，空间不足时上方）。
-        水平居中对齐桌宠，垂直和水平位置均钳制在屏幕可视区域内。
+        水平居中对齐桌宠，垂直和水平位置均钳制在桌宠中心所在屏幕的可视区域内。
         """
         pet_global = self.mapToGlobal(QPoint(0, 0))
         chat_w = chat_window.width()
         chat_h = chat_window.height()
-        screen = QApplication.primaryScreen()
+        screen = QGuiApplication.screenAt(self.geometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
         if screen:
             avail = screen.availableGeometry()
             # 下方优先，空间不足时上方
@@ -380,9 +388,84 @@ class PetWindow(QWidget):
             y = pet_global.y() + self.height() + 5
         chat_window.move(x, y)
 
+    def move_chat_by_delta(self, chat_window: QWidget, delta: QPoint) -> None:
+        """按 delta 平移聊天窗口，钳制到桌宠中心所在屏幕的可视区域。
+
+        Args:
+            chat_window: 聊天窗口实例。
+            delta: 桌宠位移量（屏幕坐标）。
+        """
+        if delta.isNull():
+            return
+        new_pos = chat_window.pos() + delta
+        chat_w = chat_window.width()
+        chat_h = chat_window.height()
+        # 用 chat_window 中心点定位屏幕（拖动后中心点所在屏）
+        target_center = new_pos + QPoint(chat_w // 2, chat_h // 2)
+        screen = QGuiApplication.screenAt(target_center)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            x = max(avail.left(), min(new_pos.x(), avail.right() - chat_w))
+            y = max(avail.top(), min(new_pos.y(), avail.bottom() - chat_h))
+        else:
+            x, y = new_pos.x(), new_pos.y()
+        chat_window.move(x, y)
+
+    def _take_screenshot(self) -> QPixmap | None:
+        """截取桌宠中心所在屏的当前画面。
+
+        Returns:
+            QPixmap 或 None（无屏幕时）。
+        """
+        screen = QGuiApplication.screenAt(self.geometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return None
+        return screen.grabWindow(0)
+
+    # 兼容旧调用名
+    def position_chat_window(self, chat_window: QWidget) -> None:
+        """向后兼容：等价于 position_chat_window_default。"""
+        self.position_chat_window_default(chat_window)
+
     def reload_image(self) -> None:
         """重新加载宠物图片（例如配置更改后）。"""
         self._load_pet_image()
+
+    # ---- 透明度 ----
+
+    def set_opacity(self, opacity: float) -> None:
+        """设置窗口透明度。
+
+        Args:
+            opacity: 0.0 完全透明 ~ 1.0 完全不透明。
+        """
+        self.setWindowOpacity(max(0.1, min(1.0, opacity)))
+
+    # ---- 右键菜单 ----
+
+    def set_tray_manager(self, tray_manager: Any) -> None:
+        """注入 TrayManager 实例，用于复用其菜单构造逻辑。
+
+        Args:
+            tray_manager: TrayManager 实例。
+        """
+        self._tray_manager = tray_manager
+
+    def contextMenuEvent(self, event) -> None:
+        """右键桌宠时弹出与托盘一致的菜单（含透明度、Pet/Chat 子菜单）。"""
+        if self._tray_manager is None:
+            super().contextMenuEvent(event)
+            return
+        menu = QMenu(self)
+        # 复用 TrayManager.build_menu 填充菜单项
+        self._tray_manager.build_menu(menu, with_quit_confirm=True)
+        # QContextMenuEvent.globalPos() 已是 QPoint，无需 toPoint()
+        menu.exec(event.globalPos())
+        event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         """双击宠物窗口时请求打开聊天窗口。"""
@@ -406,16 +489,23 @@ class PetWindow(QWidget):
         """按住鼠标按钮移动时拖拽窗口，限制在屏幕可视区域内。"""
         if event.buttons() == Qt.MouseButton.LeftButton and self._drag_position is not None and not self.CLICK_THROUGH:
             new_pos = event.globalPosition().toPoint() - self._drag_position
-            # 钳制到屏幕可视区域
-            screen = QApplication.primaryScreen()
+            # 钳制到桌宠中心所在屏幕的可视区域
+            screen = QGuiApplication.screenAt(new_pos + QPoint(self.width() // 2, self.height() // 2))
+            if screen is None:
+                screen = QApplication.primaryScreen()
             if screen:
                 avail = screen.availableGeometry()
                 clamped_x = max(avail.left(), min(new_pos.x(), avail.right() - self.width()))
                 clamped_y = max(avail.top(), min(new_pos.y(), avail.bottom() - self.height()))
                 new_pos = QPoint(clamped_x, clamped_y)
+            old_pos = self.pos()
             self.move(new_pos)
             self._position_dialog()
             self.pet_moved.emit()
+            # 计算 delta 通知聊天窗口跟随
+            delta = new_pos - old_pos
+            if not delta.isNull():
+                self.pet_moved_delta.emit(delta)
             event.accept()
         else:
             super().mouseMoveEvent(event)

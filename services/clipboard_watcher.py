@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING, cast
 
 from src.core.components.base import BaseService
 from src.app.plugin_system.api.log_api import get_logger
+from src.core.prompt import (
+    SystemReminderBucket,
+    SystemReminderConsumeType,
+    SystemReminderInsertType,
+    get_system_reminder_store,
+)
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -85,8 +91,22 @@ class ClipboardWatcherService(BaseService):
             try:
                 current = pyperclip.paste() or ""
                 if current != self._last_text:
-                    self._last_text = current[:max_len] if len(current) > max_len else current
-                    preview = self._last_text[:50].replace("\n", " ")
-                    self._log.info("Clipboard changed: %s...", preview)
+                    # 先保存完整内容用于下次比较，再截断用于显示和注入
+                    self._last_text = current
+                    display_text = current[:max_len] if len(current) > max_len else current
+                    preview = display_text[:50].replace("\n", " ")
+                    self._log.info(f"Clipboard changed: {preview}...")
+                    # 注入 system reminder
+                    try:
+                        store = get_system_reminder_store()
+                        store.set(
+                            bucket=SystemReminderBucket.ACTOR,
+                            name="desktop_pet_clipboard",
+                            content=f"用户刚刚复制了内容：{display_text}",
+                            insert_type=SystemReminderInsertType.DYNAMIC,
+                            consume=SystemReminderConsumeType.ONCE,
+                        )
+                    except Exception:
+                        self._log.error("Failed to inject clipboard reminder", exc_info=True)
             except Exception:
-                self._log.exception("Clipboard watch check failed")
+                self._log.error("Clipboard watch check failed", exc_info=True)

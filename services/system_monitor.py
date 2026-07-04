@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING, cast
 
 from src.core.components.base import BaseService
 from src.app.plugin_system.api.log_api import get_logger
+from src.core.prompt import (
+    SystemReminderBucket,
+    SystemReminderConsumeType,
+    SystemReminderInsertType,
+    get_system_reminder_store,
+)
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -81,10 +87,24 @@ class SystemMonitorService(BaseService):
                 mem = psutil.virtual_memory().percent
 
                 if cpu > cpu_thresh:
-                    self._log.warning("High CPU: %.1f%% (threshold: %.1f%%)", cpu, cpu_thresh)
+                    self._log.warning(f"High CPU: {cpu:.1f}% (threshold: {cpu_thresh:.1f}%)")
                 if mem > mem_thresh:
-                    self._log.warning("High memory: %.1f%% (threshold: %.1f%%)", mem, mem_thresh)
+                    self._log.warning(f"High memory: {mem:.1f}% (threshold: {mem_thresh:.1f}%)")
+
+                # 注入 system reminder（每次刷新，超阈值才注入）
+                if cpu > cpu_thresh or mem > mem_thresh:
+                    try:
+                        store = get_system_reminder_store()
+                        store.set(
+                            bucket=SystemReminderBucket.ACTOR,
+                            name="desktop_pet_system_status",
+                            content=f"系统状态：CPU {cpu:.1f}%，内存 {mem:.1f}%",
+                            insert_type=SystemReminderInsertType.DYNAMIC,
+                            consume=SystemReminderConsumeType.ONCE,
+                        )
+                    except Exception:
+                        self._log.error("Failed to inject system_status reminder", exc_info=True)
             except Exception:
-                self._log.exception("System monitor check failed")
+                self._log.error("System monitor check failed", exc_info=True)
 
             await asyncio.sleep(interval)

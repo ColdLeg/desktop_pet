@@ -60,6 +60,7 @@ class DialogBox(QWidget):
         self._typing_timer: QTimer | None = None
         self._hide_timer: QTimer | None = None
         self._fade_animation: QPropertyAnimation | None = None
+        self._accelerated: bool = False
 
         # --- 设置 ---
         self._build_ui()
@@ -149,6 +150,44 @@ class DialogBox(QWidget):
         self._stop_all_timers()
         self.setWindowOpacity(1.0)
         self.hide()
+
+    @property
+    def current_text(self) -> str:
+        """返回当前完整文本（用于跨窗口 copy）。"""
+        return self._full_text
+
+    def is_outputting(self) -> bool:
+        """是否正在打字机输出或等待隐藏。"""
+        return (
+            (self._typing_timer is not None and self._typing_timer.isActive())
+            or (self._hide_timer is not None and self._hide_timer.isActive())
+            or self.isVisible()
+        )
+
+    def accelerate_hide(self) -> None:
+        """加速隐藏：把剩余 auto_hide 时间减半。
+
+        用于 chat_window 打开时，让 pet 气泡更快消失。
+        如果打字机仍在进行，跳过到完整文本并重启更短的隐藏计时。
+        """
+        if not self.isVisible():
+            return
+        self._accelerated = True
+        # 跳过打字机
+        if self._typing_timer and self._typing_timer.isActive():
+            self._typing_timer.stop()
+            self._label.setText(self._full_text)
+            self._current_index = len(self._full_text)
+            self.adjustSize()
+        # 重启更短的隐藏计时（原时长的一半）
+        if self._auto_hide_sec > 0:
+            if self._hide_timer and self._hide_timer.isActive():
+                self._hide_timer.stop()
+            short = max(0.5, self._auto_hide_sec * 0.5)
+            self._hide_timer = QTimer(self)
+            self._hide_timer.setSingleShot(True)
+            self._hide_timer.timeout.connect(lambda: self.hide_with_fade())
+            self._hide_timer.start(int(short * 1000))
 
     # ---- 内部辅助方法 ----
 

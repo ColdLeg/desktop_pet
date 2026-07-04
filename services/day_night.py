@@ -11,6 +11,13 @@ from datetime import datetime
 from typing import TYPE_CHECKING, cast
 
 from src.core.components.base import BaseService
+from src.app.plugin_system.api.log_api import get_logger
+from src.core.prompt import (
+    SystemReminderBucket,
+    SystemReminderConsumeType,
+    SystemReminderInsertType,
+    get_system_reminder_store,
+)
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -37,7 +44,23 @@ class DayNightService(BaseService):
         super().__init__(plugin)
         self._mode: str = "day"
         self._manual_override: bool = False
+        self._log = get_logger("desktop_pet.day_night")
         self._update_mode()
+
+    def _inject_reminder(self) -> None:
+        """把昼夜状态注入 actor system reminder。"""
+        try:
+            store = get_system_reminder_store()
+            content = "当前是白天" if self._mode == "day" else "当前是夜晚"
+            store.set(
+                bucket=SystemReminderBucket.ACTOR,
+                name="desktop_pet_day_night",
+                content=content,
+                insert_type=SystemReminderInsertType.DYNAMIC,
+                consume=SystemReminderConsumeType.ONCE,
+            )
+        except Exception:
+            self._log.error("Failed to inject day_night reminder", exc_info=True)
 
     def _get_config(self) -> DesktopPetConfig | None:
         """从插件获取桌面宠物配置。"""
@@ -60,12 +83,17 @@ class DayNightService(BaseService):
             sleep_hour = config.sleep.sleep_start_hour
 
         hour = datetime.now().hour
+        old_mode = self._mode
 
         # 白天：wake_start_hour <= hour < sleep_start_hour
         if wake_hour <= hour < sleep_hour:
             self._mode = "day"
         else:
             self._mode = "night"
+
+        # 模式切换时注入 reminder
+        if old_mode != self._mode:
+            self._inject_reminder()
 
     @property
     def is_day(self) -> bool:
@@ -116,6 +144,8 @@ class DayNightService(BaseService):
     async def start(self) -> None:
         """启动日/夜服务（被动服务，无需后台循环）。"""
         self._update_mode()
+        # 启动时注入初始状态
+        self._inject_reminder()
 
     async def stop(self) -> None:
         """停止日/夜服务（被动服务，无需清理）。"""

@@ -12,7 +12,16 @@ import os
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QPoint, Qt, Signal, QTimer, QUrl
+from PySide6.QtCore import (
+    QPropertyAnimation,
+    QEasingCurve,
+    QPoint,
+    QSize,
+    Qt,
+    Signal,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -46,6 +55,8 @@ class ChatWindow(QWidget):
     """
 
     message_sent = Signal(str)
+    offset_changed = Signal(QPoint)
+    visibility_changed = Signal(bool)
 
     WIN_TITLE = "MoFox 桌宠"
     WIN_WIDTH = 380
@@ -177,6 +188,11 @@ class ChatWindow(QWidget):
             getattr(config.chat, "show_chat_messages", False)
         ) if config else False
 
+        # 消息区是否已延迟构建（_show_messages=False 时初始不构建，
+        # 收到第一条 bot 消息时临时构建并切换窗口尺寸）
+        self._messages_built: bool = self._show_messages
+        self._size_anim: QPropertyAnimation | None = None
+
         self.setWindowTitle(self.WIN_TITLE)
         # 按主屏面积 1.8% 计算缩放因子（与 PetWindow 同算法，基准 200x200）
         # PetWindow 用 1%，ChatWindow 略大一些
@@ -184,7 +200,9 @@ class ChatWindow(QWidget):
         win_h_base = self.WIN_HEIGHT_FULL if self._show_messages else self.WIN_HEIGHT
         self._win_w = int(self.WIN_WIDTH * self._scale)
         self._win_h = int(win_h_base * self._scale)
-        self.setFixedSize(self._win_w, self._win_h)
+        # 初始用固定尺寸；延迟构建消息区时会用动画过渡到完整高度
+        self.setMinimumSize(0, 0)
+        self.resize(self._win_w, self._win_h)
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
@@ -287,26 +305,12 @@ class ChatWindow(QWidget):
 
         container_layout.addWidget(self._title_bar)
 
+        # 保存 container_layout 以便延迟构建消息区
+        self._container_layout = container_layout
+
         # --- 消息滚动区（仅在开启消息显示时构建）---
         if self._show_messages:
-            self._message_scroll = QScrollArea()
-            self._message_scroll.setObjectName("message_scroll")
-            self._message_scroll.setWidgetResizable(True)
-            self._message_scroll.setHorizontalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            )
-            self._message_scroll.setFrameShape(QFrame.Shape.NoFrame)
-
-            scroll_content = QWidget()
-            scroll_content.setObjectName("scroll_content")
-            self._message_layout = QVBoxLayout(scroll_content)
-            m = int(10 * self._scale)
-            self._message_layout.setContentsMargins(m, m, m, m)
-            self._message_layout.setSpacing(int(8 * self._scale))
-            self._message_layout.addStretch()
-
-            self._message_scroll.setWidget(scroll_content)
-            container_layout.addWidget(self._message_scroll, stretch=1)
+            self._build_message_scroll(container_layout)
 
         # --- 输入区 ---
         input_bar = QFrame()
@@ -351,6 +355,46 @@ class ChatWindow(QWidget):
         qss = qss.replace("border-radius: 8px;", f"border-radius: {int(8 * s)}px;")
         self.setStyleSheet(qss)
 
+    def _build_message_scroll(self, container_layout: QVBoxLayout) -> None:
+        """构建消息滚动区并添加到 container_layout。"""
+        self._message_scroll = QScrollArea()
+        self._message_scroll.setObjectName("message_scroll")
+        self._message_scroll.setWidgetResizable(True)
+        self._message_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._message_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("scroll_content")
+        self._message_layout = QVBoxLayout(scroll_content)
+        m = int(10 * self._scale)
+        self._message_layout.setContentsMargins(m, m, m, m)
+        self._message_layout.setSpacing(int(8 * self._scale))
+        self._message_layout.addStretch()
+
+        self._message_scroll.setWidget(scroll_content)
+        # 插入到标题栏之后、输入栏之前
+        container_layout.insertWidget(1, self._message_scroll, stretch=1)
+
+    def _ensure_messages_built(self) -> None:
+        """_show_messages=False 时收到 bot 消息触发延迟构建消息区，
+        并以动画过渡到完整高度。
+        """
+        if self._messages_built:
+            return
+        self._messages_built = True
+        self._build_message_scroll(self._container_layout)
+        # 动画过渡到 WIN_HEIGHT_FULL
+        target_h = int(self.WIN_HEIGHT_FULL * self._scale)
+        self._size_anim = QPropertyAnimation(self, b"size")
+        self._size_anim.setDuration(220)
+        self._size_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._size_anim.setStartValue(QSize(self._win_w, self._win_h))
+        self._size_anim.setEndValue(QSize(self._win_w, target_h))
+        self._size_anim.start()
+        self._win_h = target_h
+
     def _on_send(self) -> None:
         """处理发送动作：发射消息信号并清空输入框。"""
         text = self._input.text()
@@ -358,21 +402,31 @@ class ChatWindow(QWidget):
             self.message_sent.emit(text)
             self._input.clear()
 
-    def append_message(self, role: str, text: str) -> None:
+    def append_message(
+        self,
+        role: str,
+        text: str,
+        reply_to: str = "",
+        emoji_bytes: bytes = b"",
+    ) -> None:
         """向消息历史追加一条消息气泡。
 
-        当 show_chat_messages=False 时仅播放提示音。
-        当 show_chat_messages=True 时创建气泡并添加到消息区。
+        当 show_chat_messages=False 时：
+        - user/system 消息忽略（无显示区）
+        - bot 消息触发延迟构建消息区，并以动画过渡到完整高度
+        当 show_chat_messages=True 时正常追加气泡。
 
         Args:
             role: "user" 右对齐蓝色气泡，"system" 居中灰色气泡，
                   其他左对齐深灰气泡。label 从 config 读取。
             text: 消息文本内容。
+            reply_to: 可选，被回复消息的 ID（用于显示"↩ 回复某条消息"标记）。
         """
-        if not self._show_messages:
-            if role not in ("user", "system") and self._sound_effect:
-                self._sound_effect.play()
-            return
+        # 未开启显示区时，任意非 system 消息触发延迟构建
+        if not self._messages_built:
+            if role == "system":
+                return
+            self._ensure_messages_built()
 
         if role == "user":
             label = (
@@ -387,7 +441,7 @@ class ChatWindow(QWidget):
                 if self._config else "桌宠"
             )
 
-        bubble = self._create_bubble(role, label, text)
+        bubble = self._create_bubble(role, label, text, reply_to=reply_to, emoji_bytes=emoji_bytes)
 
         if role not in ("user", "system") and self._sound_effect:
             self._sound_effect.play()
@@ -412,13 +466,22 @@ class ChatWindow(QWidget):
 
         QTimer.singleShot(0, _deferred_scroll)
 
-    def _create_bubble(self, role: str, label: str, text: str) -> QFrame:
+    def _create_bubble(
+        self,
+        role: str,
+        label: str,
+        text: str,
+        reply_to: str = "",
+        emoji_bytes: bytes = b"",
+    ) -> QFrame:
         """创建单条消息气泡 widget。
 
         Args:
             role: 消息角色，决定气泡颜色和对齐。
             label: 发送者名称（系统消息为空）。
             text: 消息文本内容。
+            reply_to: 可选，被回复消息 ID（用于显示"↩ 回复某条消息"标记）。
+            emoji_bytes: 可选，emoji 图片字节（GIF/PNG），渲染为图片标签。
 
         Returns:
             配置好样式的 QFrame 气泡。
@@ -427,6 +490,14 @@ class ChatWindow(QWidget):
         layout = QVBoxLayout(bubble)
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(2)
+
+        # 回复标记（仅 bot 气泡且带 reply_to 时显示）
+        if reply_to and role not in ("user", "system"):
+            reply_label = QLabel(f"↩ 回复消息 {reply_to[:8]}")
+            reply_label.setStyleSheet(
+                f"color: {self.C_PRIMARY}; font-size: 10px; background: transparent;"
+            )
+            layout.addWidget(reply_label)
 
         if role == "system":
             msg = QLabel(text)
@@ -449,14 +520,34 @@ class ChatWindow(QWidget):
                 "font-size: 11px; font-weight: 600; background: transparent;"
             )
 
-            msg = QLabel(text)
-            msg.setWordWrap(True)
-            msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            msg.setTextFormat(Qt.TextFormat.PlainText)
-            msg.setStyleSheet("font-size: 14px; background: transparent;")
-
             layout.addWidget(sender)
-            layout.addWidget(msg)
+
+            # 文本（若有）
+            if text:
+                msg = QLabel(text)
+                msg.setWordWrap(True)
+                msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                msg.setTextFormat(Qt.TextFormat.PlainText)
+                msg.setStyleSheet("font-size: 14px; background: transparent;")
+                layout.addWidget(msg)
+
+            # emoji 图片（若有）
+            if emoji_bytes:
+                emoji_label = QLabel()
+                emoji_label.setStyleSheet("background: transparent;")
+                from PySide6.QtGui import QPixmap
+                pm = QPixmap()
+                pm.loadFromData(emoji_bytes)
+                if not pm.isNull():
+                    # 限制最大显示尺寸，等比缩放
+                    max_side = int(120 * self._scale)
+                    scaled = pm.scaled(
+                        max_side, max_side,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    emoji_label.setPixmap(scaled)
+                    layout.addWidget(emoji_label)
 
             if role == "user":
                 bubble.setStyleSheet(
@@ -467,10 +558,11 @@ class ChatWindow(QWidget):
                     f"color: {self.C_PRIMARY}; font-size: 11px;"
                     " font-weight: 600; background: transparent;"
                 )
-                msg.setStyleSheet(
-                    f"color: {self.C_ON_PRIMARY_CONTAINER}; font-size: 14px;"
-                    " background: transparent;"
-                )
+                if text:
+                    msg.setStyleSheet(
+                        f"color: {self.C_ON_PRIMARY_CONTAINER}; font-size: 14px;"
+                        " background: transparent;"
+                    )
             else:
                 bubble.setStyleSheet(
                     f"background-color: {self.C_SURFACE_CONTAINER_HIGH};"
@@ -480,10 +572,41 @@ class ChatWindow(QWidget):
                     f"color: {self.C_ON_SURFACE_VARIANT}; font-size: 11px;"
                     " font-weight: 600; background: transparent;"
                 )
-                msg.setStyleSheet(
-                    f"color: {self.C_ON_SURFACE}; font-size: 14px;"
-                    " background: transparent;"
+                if text:
+                    msg.setStyleSheet(
+                        f"color: {self.C_ON_SURFACE}; font-size: 14px;"
+                        " background: transparent;"
+                    )
+            bubble.setMaximumWidth(300)
+
+            if role == "user":
+                bubble.setStyleSheet(
+                    f"background-color: {self.C_PRIMARY_CONTAINER};"
+                    " border-radius: 12px;"
                 )
+                sender.setStyleSheet(
+                    f"color: {self.C_PRIMARY}; font-size: 11px;"
+                    " font-weight: 600; background: transparent;"
+                )
+                if text:
+                    msg.setStyleSheet(
+                        f"color: {self.C_ON_PRIMARY_CONTAINER}; font-size: 14px;"
+                        " background: transparent;"
+                    )
+            else:
+                bubble.setStyleSheet(
+                    f"background-color: {self.C_SURFACE_CONTAINER_HIGH};"
+                    " border-radius: 12px;"
+                )
+                sender.setStyleSheet(
+                    f"color: {self.C_ON_SURFACE_VARIANT}; font-size: 11px;"
+                    " font-weight: 600; background: transparent;"
+                )
+                if text:
+                    msg.setStyleSheet(
+                        f"color: {self.C_ON_SURFACE}; font-size: 14px;"
+                        " background: transparent;"
+                    )
             bubble.setMaximumWidth(300)
 
         return bubble
@@ -518,6 +641,62 @@ class ChatWindow(QWidget):
             event.accept()
         else:
             super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        """释放鼠标时清除拖拽状态并 emit 偏移变化。"""
+        if self._drag_position is not None:
+            # 通知父组件（pet_window）计算相对偏移
+            # 此处 emit 一个相对全局原点的 QPoint，由 plugin 层减去 pet 全局坐标
+            self.offset_changed.emit(self.pos())
+            self._drag_position = None
+        super().mouseReleaseEvent(event)
+
+    def showEvent(self, event) -> None:
+        """窗口显示时通知可见性变化。"""
+        super().showEvent(event)
+        self.visibility_changed.emit(True)
+
+    def hideEvent(self, event) -> None:
+        """窗口隐藏时通知可见性变化。"""
+        super().hideEvent(event)
+        self.visibility_changed.emit(False)
+
+    def load_history(self, messages: list) -> None:
+        """批量加载历史消息并渲染。
+
+        Args:
+            messages: 历史消息列表，每项为 dict {"role": "user"/"bot"/"system", "text": str}。
+        """
+        if not self._show_messages or not messages:
+            return
+        for msg in messages:
+            role = msg.get("role", "bot")
+            text = msg.get("text", "")
+            reply_to = msg.get("reply_to", "")
+            if not text:
+                continue
+            emoji_bytes = msg.get("emoji_bytes", b"") or b""
+            # 直接调 _create_bubble + addWidget，跳过提示音和滚动延迟
+            if role == "user":
+                label = (
+                    getattr(self._config.chat, "user_name", "用户")
+                    if self._config else "用户"
+                )
+            elif role == "system":
+                label = ""
+            else:
+                label = (
+                    getattr(self._config.chat, "pet_name", "桌宠")
+                    if self._config else "桌宠"
+                )
+            bubble = self._create_bubble(role, label, text, reply_to=reply_to, emoji_bytes=emoji_bytes)
+            if role == "user":
+                self._message_layout.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignRight)
+            elif role == "system":
+                self._message_layout.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignCenter)
+            else:
+                self._message_layout.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignLeft)
+        QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _is_in_title_bar(self, widget: QWidget) -> bool:
         """检查 widget 是否属于标题栏。
