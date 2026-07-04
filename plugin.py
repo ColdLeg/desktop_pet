@@ -29,7 +29,98 @@ from mofox_wire import MessageBuilder, MessageEnvelope
 
 from .config import DesktopPetConfig
 
-logger = get_logger("desktop_pet")
+# 淡蓝色边框颜色（print_all_logs 开启时使用）
+_PANEL_BORDER_COLOR = "#9EF6FF"
+
+
+class _BorderedLogger:
+    """桌宠插件日志包装器。
+
+    未开启 print_all_logs 时完全透传给底层 logger，行为与原 logger 一致。
+    开启 print_all_logs 后，每条日志通过 print_panel 输出带淡蓝色 #9EF6FF
+    边框的面板，便于在控制台中快速定位本插件日志。
+    """
+
+    def __init__(self, underlying) -> None:
+        self._underlying = underlying
+        self._enabled: bool = False
+
+    @property
+    def underlying(self):
+        return self._underlying
+
+    def set_bordered(self, enabled: bool) -> None:
+        self._enabled = enabled
+
+    def _emit(self, level: str, message: str, *, exc_info=None) -> None:
+        if not self._enabled:
+            return
+        try:
+            text = f"[{level}] {message}"
+            if exc_info:
+                import traceback
+                if isinstance(exc_info, BaseException):
+                    tb_lines = traceback.format_exception(
+                        type(exc_info), exc_info, exc_info.__traceback__
+                    )
+                elif exc_info is True:
+                    import sys
+                    exc_type, exc_val, exc_tb = sys.exc_info()
+                    tb_lines = traceback.format_exception(exc_type, exc_val, exc_tb)
+                else:
+                    tb_lines = [str(exc_info)]
+                text += "\n" + "".join(tb_lines)
+            self._underlying.print_panel(
+                text,
+                title=self._underlying.display,
+                border_style=_PANEL_BORDER_COLOR,
+            )
+        except Exception:
+            # 任何异常都不影响主流程
+            pass
+
+    def debug(self, message: str, **kwargs) -> None:
+        if self._enabled:
+            self._emit("DEBUG", message)
+        else:
+            self._underlying.debug(message, **kwargs)
+
+    def info(self, message: str, **kwargs) -> None:
+        if self._enabled:
+            self._emit("INFO", message)
+        else:
+            self._underlying.info(message, **kwargs)
+
+    def warning(self, message: str, **kwargs) -> None:
+        if self._enabled:
+            self._emit("WARNING", message)
+        else:
+            self._underlying.warning(message, **kwargs)
+
+    def error(self, message: str, **kwargs) -> None:
+        if self._enabled:
+            self._emit("ERROR", message)
+        else:
+            self._underlying.error(message, **kwargs)
+
+    def critical(self, message: str, **kwargs) -> None:
+        if self._enabled:
+            self._emit("CRITICAL", message)
+        else:
+            self._underlying.critical(message, **kwargs)
+
+    def exception(self, message: str, **kwargs) -> None:
+        if self._enabled:
+            self._emit("ERROR", message, exc_info=True)
+        else:
+            self._underlying.exception(message, **kwargs)
+
+    def __getattr__(self, name):
+        # 透传其它属性/方法（如 set_metadata/set_log_level/print_panel/print_rich 等）
+        return getattr(self._underlying, name)
+
+
+logger = _BorderedLogger(get_logger("desktop_pet"))
 
 
 class DesktopPetAdapter(BaseAdapter):
@@ -87,9 +178,9 @@ class DesktopPetAdapter(BaseAdapter):
 
         # 按配置调整日志级别
         if self._config and self._config.plugin.print_all_logs:
-            logger.set_log_level("DEBUG")
+            logger.underlying.set_log_level("DEBUG")
             # 为本插件所有日志加上淡蓝色 #9EF6FF 边框
-            logger.set_metadata("panel_border", "#9EF6FF")
+            logger.set_bordered(True)
             logger.info("print_all_logs enabled, log level set to DEBUG")
 
         # 启动服务
