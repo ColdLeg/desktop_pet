@@ -1,6 +1,8 @@
 """桌宠插件配置"""
 
-from typing import ClassVar
+from typing import Any, ClassVar
+
+from pydantic import ConfigDict, model_validator
 
 from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_section
 
@@ -77,6 +79,10 @@ class DesktopPetConfig(BaseConfig):
     config_name: ClassVar[str] = "config"
     config_description: ClassVar[str] = "MoFox 桌宠插件配置"
 
+    # 容忍 webui 偶发的扁平化提交（plugin 节字段未包裹到 plugin 下），
+    # 由 _normalize_flat_inputs 在校验前归并到对应子节。
+    model_config = ConfigDict(extra="ignore")
+
     @config_section("plugin")
     class _PluginSection(PluginSection):
         pass
@@ -112,3 +118,34 @@ class DesktopPetConfig(BaseConfig):
     clipboard: ClipboardSection = Field(default_factory=ClipboardSection)
     chat: ChatSection = Field(default_factory=ChatSection)
     proactive: ProactiveSection = Field(default_factory=ProactiveSection)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_flat_inputs(cls, data: Any) -> Any:
+        """把顶层扁平出现的 section 字段归并到对应子节字典。
+
+        webui 在某些场景下会以扁平结构提交（如 {"enabled": True, "print_all_logs": True}），
+        这里将其归并到 {"plugin": {...}} 等结构，避免 extra="forbid" 拒绝。
+        """
+        if not isinstance(data, dict):
+            return data
+
+        result = dict(data)
+        # 遍历每个 section 字段，收集属于它的扁平键
+        for section_name, field_info in cls.model_fields.items():
+            section_type = getattr(field_info, "annotation", None)
+            section_fields = getattr(section_type, "model_fields", None)
+            if not section_fields:
+                continue
+            target = result.get(section_name)
+            if not isinstance(target, dict):
+                target = {}
+            moved = False
+            for fname in section_fields:
+                if fname in result:
+                    # 顶层扁平出现了属于本节的字段，归并到子节字典
+                    target[fname] = result.pop(fname)
+                    moved = True
+            if moved:
+                result[section_name] = target
+        return result
