@@ -7,6 +7,7 @@ from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_se
 class PluginSection(SectionBase):
     """插件通用配置"""
     enabled: bool = Field(default=True, description="启用桌宠插件")
+    print_all_logs: bool = Field(default=False, description="打印所有日志（DEBUG 级别），默认关闭")
 
 class PetSection(SectionBase):
     """桌宠外观配置"""

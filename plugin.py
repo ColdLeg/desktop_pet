@@ -85,6 +85,13 @@ class DesktopPetAdapter(BaseAdapter):
             self._config = DesktopPetConfig()
             logger.warning("No DesktopPetConfig found on plugin, using defaults")
 
+        # 按配置调整日志级别
+        if self._config and self._config.plugin.print_all_logs:
+            logger.set_log_level("DEBUG")
+            # 为本插件所有日志加上淡蓝色 #9EF6FF 边框
+            logger.set_metadata("panel_border", "#9EF6FF")
+            logger.info("print_all_logs enabled, log level set to DEBUG")
+
         # 启动服务
         await self._start_services()
 
