@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **透明、无边框、置顶窗口** — 宠物在你工作时始终可见。
+- **透明、无边框、置顶窗口** — 宠物在你工作时始终可见；窗口不出现在任务栏，关闭操作改为隐藏而非销毁。
 - **可拖拽** — 点击并拖拽宠物窗口到屏幕任意位置；多屏环境下自动钳制到所在屏幕。
 - **独立聊天窗口** — 双击宠物打开 MD3 暗色风格的聊天窗口，支持消息气泡、表情包渲染、回复引用标记。
 - **消息路由** — 聊天窗口可见时回复进 chat 历史；不可见时以打字机气泡显示在桌宠旁。
@@ -91,14 +91,6 @@
 | `chat_offset_x` | int | 0 | 聊天窗口相对桌宠的 X 偏移 |
 | `chat_offset_y` | int | 0 | 聊天窗口相对桌宠的 Y 偏移 |
 
-### 主动聊天 `[proactive]`
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | bool | true | 启用定时主动聊天 |
-| `interval` | int | 1800 | 主动聊天间隔（秒，最小 60） |
-| `prompt` | str | （见下） | 主动聊天提示词 |
-
 ### 屏幕监控 `[screen_watcher]`
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -126,7 +118,6 @@
 | 场景 | chat_window 可见 | chat_window 不可见 |
 |------|------------------|-------------------|
 | 用户发送消息后 bot 回复 | 进 chat 历史 | 进 pet 气泡 |
-| bot 主动消息（proactive） | 进 chat 历史 | 进 pet 气泡 |
 | 截图触发 bot 回复 | 进 chat 历史 + 写回私聊 stream | 进 pet 气泡 + 写回私聊 stream |
 | 错误反馈 | 进 chat 历史 + 写日志 | 进 pet 气泡 + 写日志 |
 
@@ -137,6 +128,7 @@
 | 名称 | Bucket | Consume | 来源 |
 |------|--------|---------|------|
 | `desktop_pet_identity` | ACTOR | FOREVER | `chat.system_prompt` |
+| `desktop_pet_tool_restrictions` | ACTOR | FOREVER | `DesktopPetAdapter.start()` 注入，告知 AI 不要使用表情包相关工具 |
 | `desktop_pet_user_qq` | ACTOR | FOREVER | `chat.user_qq_id`（非空时） |
 | `desktop_pet_day_night` | ACTOR | ONCE | DayNightService 状态切换时 |
 | `desktop_pet_system_status` | ACTOR | ONCE | SystemMonitorService 超阈值时 |
@@ -174,6 +166,39 @@ desktop_pet/
 - Pillow 用于截图缩放（screen_watcher 服务）
 - MoFox 插件系统（BaseAdapter、BasePlugin、BaseService）
 - 主程序复用：`MediaManager`（VLM 识别）、`StreamManager`（消息持久化）、`get_system_reminder_store`（上下文注入）
+
+## 更新日志
+
+### 2026-07-05
+
+#### 桌宠窗口优化
+- PetWindow 和 ChatWindow 添加 `Qt.WindowType.Tool` 标志，不再出现在任务栏
+- 重写 `closeEvent`，Alt+F4 或关闭按钮改为隐藏窗口而非销毁
+- 注入 `desktop_pet_tool_restrictions` system reminder，告知 AI 不要使用表情包相关工具
+
+#### 桌宠翻新后三个问题修复
+- `follow` 模式下拖动桌宠时，聊天窗口改为重新定位（不再 delta 平移）
+- 修复消息气泡排序：`addWidget` → `insertWidget`，消息从顶部开始排列
+- 修复 `load_history` 重复加载：每次加载前清空旧消息气泡
+- 删除 `_create_bubble` 中重复的 user/bot 样式代码
+- `pet_width`/`pet_height` 配置 description 更新，说明值会被屏幕面积比例覆盖
+
+#### 聊天框定位改为左右适配
+- `position_chat_window_default` 从"上下补位"改为"左右适配"（右侧优先，左侧兜底）
+- 垂直方向居中对齐桌宠
+
+#### 右键菜单去重 + 聊天框吞字修复（第一轮）
+- 删除右键菜单中重复的"显示宠物"/"隐藏宠物"（与 Pet/Chat 子菜单功能相同）
+- 删除无功能的"系统信息..."菜单项
+- 消息气泡 QLabel 添加 `QSizePolicy(Expanding, MinimumExpanding)`，修复文本垂直裁剪
+
+#### 删除主动聊天功能 + 加强吞字修复（第二轮）
+- 删除 `ProactiveSection` 配置段和 `_proactive_loop` 定时循环
+- 消息气泡 `setMaximumWidth` → `setFixedWidth`，给 Qt 布局系统确定宽度，彻底修复吞字
+
+#### 修复 screen_watcher recognize_media 调用签名不匹配
+- `_recognize_with_vlm` 方法：读取图片数据 → `base64_encode_bytes` 编码 → 调用 `recognize_media(base64_data, media_type="image")`
+- 去掉不存在的 `prompt=` 关键字参数，修复 `TypeError`
 
 ## 📄 开源协议
 
