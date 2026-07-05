@@ -3,7 +3,7 @@
     "display_name": "MoFox 桌宠",
     "version": "0.1.0",
     "description": "MoFox 桌宠插件 - 将桌面桌宠接入 MoFox 聊天流",
-    "categories": ["entertainment"],
+    "categories": ["fun"],
     "tags": ["desktop-pet", "gui", "companion", "pyside6"],
     "author": "MoFox Team",
     "dependencies": {
