@@ -197,7 +197,12 @@ class ScreenWatcherService(BaseService):
             return b""
 
     async def _recognize_with_vlm(self, source: Any, prompt: str) -> str:
-        """调用主程序 MediaManager 识别图片，返回描述文本。"""
+        """调用主程序 MediaManager 识别图片，返回描述文本。
+
+        Args:
+            source: 截图文件路径或 PNG bytes。
+            prompt: VLM 提示词（当前 MediaManager 使用内部 prompt template，此参数暂未使用）。
+        """
         try:
             from src.core.managers.media_manager import get_media_manager
         except ImportError:
@@ -205,13 +210,16 @@ class ScreenWatcherService(BaseService):
             return ""
         try:
             mm = get_media_manager()
-            # recognize_media 接受文件路径或 bytes；具体签名以主程序为准
-            # 这里优先用文件路径，回退到 bytes
+            # 读取图片数据
             if isinstance(source, str) and os.path.isfile(source):
-                result = mm.recognize_media(source, prompt=prompt)
+                with open(source, "rb") as f:
+                    raw_data = f.read()
             else:
-                data = source if isinstance(source, (bytes, bytearray)) else bytes(source)
-                result = mm.recognize_media(data, prompt=prompt)
+                raw_data = source if isinstance(source, (bytes, bytearray)) else bytes(source)
+            # base64 编码后调用 recognize_media
+            from src.core.utils.base64_helper import base64_encode_bytes
+            base64_data = base64_encode_bytes(raw_data)
+            result = mm.recognize_media(base64_data, media_type="image")
             if hasattr(result, "__await__"):
                 result = await result
             return str(result or "").strip()

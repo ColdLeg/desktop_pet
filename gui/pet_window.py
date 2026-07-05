@@ -361,8 +361,8 @@ class PetWindow(QWidget):
             self._dialog_box.hide_immediately()
 
     def position_chat_window_default(self, chat_window: QWidget) -> None:
-        """将聊天窗口定位到桌宠上下方（下方优先，空间不足时上方）。
-        水平居中对齐桌宠，垂直和水平位置均钳制在桌宠中心所在屏幕的可视区域内。
+        """将聊天窗口定位到桌宠左右侧（右侧优先，空间不足时左侧）。
+        垂直居中对齐桌宠，垂直和水平位置均钳制在桌宠中心所在屏幕的可视区域内。
         """
         pet_global = self.mapToGlobal(QPoint(0, 0))
         chat_w = chat_window.width()
@@ -372,20 +372,20 @@ class PetWindow(QWidget):
             screen = QApplication.primaryScreen()
         if screen:
             avail = screen.availableGeometry()
-            # 下方优先，空间不足时上方
-            bottom_space = avail.bottom() - (pet_global.y() + self.height())
-            if bottom_space >= chat_h + 10:
-                y = pet_global.y() + self.height() + 5
+            # 右侧优先，空间不足时左侧
+            right_space = avail.right() - (pet_global.x() + self.width())
+            if right_space >= chat_w + 10:
+                x = pet_global.x() + self.width() + 5
             else:
-                y = pet_global.y() - chat_h - 5
-            # 水平居中对齐桌宠
-            x = pet_global.x() + (self.width() - chat_w) // 2
+                x = pet_global.x() - chat_w - 5
+            # 垂直居中对齐桌宠
+            y = pet_global.y() + (self.height() - chat_h) // 2
             # 钳制到屏幕可视区域
             x = max(avail.left(), min(x, avail.right() - chat_w))
             y = max(avail.top(), min(y, avail.bottom() - chat_h))
         else:
-            x = pet_global.x() + (self.width() - chat_w) // 2
-            y = pet_global.y() + self.height() + 5
+            x = pet_global.x() + self.width() + 5
+            y = pet_global.y() + (self.height() - chat_h) // 2
         chat_window.move(x, y)
 
     def move_chat_by_delta(self, chat_window: QWidget, delta: QPoint) -> None:

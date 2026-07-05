@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -447,16 +448,16 @@ class ChatWindow(QWidget):
             self._sound_effect.play()
 
         if role == "user":
-            self._message_layout.addWidget(
-                bubble, alignment=Qt.AlignmentFlag.AlignRight
+            self._message_layout.insertWidget(
+                self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignRight
             )
         elif role == "system":
-            self._message_layout.addWidget(
-                bubble, alignment=Qt.AlignmentFlag.AlignCenter
+            self._message_layout.insertWidget(
+                self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignCenter
             )
         else:
-            self._message_layout.addWidget(
-                bubble, alignment=Qt.AlignmentFlag.AlignLeft
+            self._message_layout.insertWidget(
+                self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignLeft
             )
 
         def _deferred_scroll() -> None:
@@ -502,6 +503,7 @@ class ChatWindow(QWidget):
         if role == "system":
             msg = QLabel(text)
             msg.setWordWrap(True)
+            msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
             msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             msg.setTextFormat(Qt.TextFormat.PlainText)
             msg.setStyleSheet(
@@ -513,7 +515,7 @@ class ChatWindow(QWidget):
                 f"background-color: {self.C_SURFACE_CONTAINER_HIGHEST};"
                 " border-radius: 8px;"
             )
-            bubble.setMaximumWidth(340)
+            bubble.setFixedWidth(340)
         else:
             sender = QLabel(label)
             sender.setStyleSheet(
@@ -526,6 +528,7 @@ class ChatWindow(QWidget):
             if text:
                 msg = QLabel(text)
                 msg.setWordWrap(True)
+                msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
                 msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 msg.setTextFormat(Qt.TextFormat.PlainText)
                 msg.setStyleSheet("font-size: 14px; background: transparent;")
@@ -577,37 +580,7 @@ class ChatWindow(QWidget):
                         f"color: {self.C_ON_SURFACE}; font-size: 14px;"
                         " background: transparent;"
                     )
-            bubble.setMaximumWidth(300)
-
-            if role == "user":
-                bubble.setStyleSheet(
-                    f"background-color: {self.C_PRIMARY_CONTAINER};"
-                    " border-radius: 12px;"
-                )
-                sender.setStyleSheet(
-                    f"color: {self.C_PRIMARY}; font-size: 11px;"
-                    " font-weight: 600; background: transparent;"
-                )
-                if text:
-                    msg.setStyleSheet(
-                        f"color: {self.C_ON_PRIMARY_CONTAINER}; font-size: 14px;"
-                        " background: transparent;"
-                    )
-            else:
-                bubble.setStyleSheet(
-                    f"background-color: {self.C_SURFACE_CONTAINER_HIGH};"
-                    " border-radius: 12px;"
-                )
-                sender.setStyleSheet(
-                    f"color: {self.C_ON_SURFACE_VARIANT}; font-size: 11px;"
-                    " font-weight: 600; background: transparent;"
-                )
-                if text:
-                    msg.setStyleSheet(
-                        f"color: {self.C_ON_SURFACE}; font-size: 14px;"
-                        " background: transparent;"
-                    )
-            bubble.setMaximumWidth(300)
+            bubble.setFixedWidth(300)
 
         return bubble
 
@@ -669,6 +642,12 @@ class ChatWindow(QWidget):
         """
         if not self._show_messages or not messages:
             return
+        # 清空已有消息气泡（保留末尾的 stretch）
+        while self._message_layout.count() > 1:
+            item = self._message_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         for msg in messages:
             role = msg.get("role", "bot")
             text = msg.get("text", "")
@@ -676,7 +655,7 @@ class ChatWindow(QWidget):
             if not text:
                 continue
             emoji_bytes = msg.get("emoji_bytes", b"") or b""
-            # 直接调 _create_bubble + addWidget，跳过提示音和滚动延迟
+            # 直接调 _create_bubble + insertWidget，跳过提示音和滚动延迟
             if role == "user":
                 label = (
                     getattr(self._config.chat, "user_name", "用户")
@@ -691,11 +670,11 @@ class ChatWindow(QWidget):
                 )
             bubble = self._create_bubble(role, label, text, reply_to=reply_to, emoji_bytes=emoji_bytes)
             if role == "user":
-                self._message_layout.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignRight)
+                self._message_layout.insertWidget(self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignRight)
             elif role == "system":
-                self._message_layout.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignCenter)
+                self._message_layout.insertWidget(self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignCenter)
             else:
-                self._message_layout.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignLeft)
+                self._message_layout.insertWidget(self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignLeft)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _is_in_title_bar(self, widget: QWidget) -> bool:

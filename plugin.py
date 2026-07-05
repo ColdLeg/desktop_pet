@@ -147,7 +147,6 @@ class DesktopPetAdapter(BaseAdapter):
         self._config: DesktopPetConfig | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._in_queue_task_info: Any | None = None
-        self._proactive_task_info: Any | None = None
 
         # --- 消息队列（桥接异步适配器 <-> GUI 线程） ---
         self._in_queue: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -242,14 +241,6 @@ class DesktopPetAdapter(BaseAdapter):
             daemon=True,
         )
 
-        # 启动主动聊天定时任务（仅在启用时创建）
-        if self._config and self._config.proactive.enabled:
-            self._proactive_task_info = tm.create_task(
-                self._proactive_loop(),
-                name="desktop_pet_proactive",
-                daemon=True,
-            )
-
     async def stop(self) -> None:
         """停止适配器：停止服务、清理 system reminder、通知 GUI 线程退出。"""
         logger.info("DesktopPetAdapter stopping")
@@ -268,15 +259,6 @@ class DesktopPetAdapter(BaseAdapter):
             store.delete(bucket=SystemReminderBucket.ACTOR, name="desktop_pet_user_qq")
         except Exception:
             logger.exception("Failed to cleanup user_qq system reminder")
-
-        # 取消主动聊天定时任务
-        if self._proactive_task_info:
-            tm = get_task_manager()
-            try:
-                tm.cancel_task(self._proactive_task_info.task_id)
-            except Exception:
-                pass
-            self._proactive_task_info = None
 
         # 通知 GUI 线程退出
         self._out_queue.put({"action": "quit"})
@@ -454,7 +436,7 @@ class DesktopPetAdapter(BaseAdapter):
 
             chat_window.offset_changed.connect(_on_offset_changed)
 
-            # 拖动桌宠时按 delta 平移聊天窗口（仅 follow 模式 + chat 可见）
+            # 拖动桌宠时重新定位聊天窗口（仅 follow 模式 + chat 可见）
             def _on_pet_moved_delta(delta) -> None:
                 cfg = self._config
                 if not cfg:
@@ -464,7 +446,7 @@ class DesktopPetAdapter(BaseAdapter):
                     return
                 if not chat_window.isVisible():
                     return
-                pet_window.move_chat_by_delta(chat_window, delta)
+                pet_window.position_chat_window_default(chat_window)
 
             pet_window.pet_moved_delta.connect(_on_pet_moved_delta)
 
@@ -584,46 +566,6 @@ class DesktopPetAdapter(BaseAdapter):
         except Exception as exc:
             logger.exception("Failed to forward message to core")
             self._route_out_message(f"消息发送失败：{exc}", role="error")
-
-    async def _proactive_loop(self) -> None:
-        """定时主动聊天循环。
-
-        按配置的间隔检查是否满足条件：
-        - proactive.enabled 为 True
-        - 当前不是夜晚模式
-        - 配置的 prompt 非空
-
-        满足条件时发送主动聊天提示词到核心处理管道。
-        """
-        while self._running:
-            try:
-                # 等待配置的间隔时间
-                await asyncio.sleep(self._config.proactive.interval)
-
-                # 检查是否启用
-                if not self._config.proactive.enabled:
-                    continue
-
-                # 检查睡眠模式是否启用且当前为夜间
-                if self._config.sleep.enabled and self._day_night_service and self._day_night_service.is_night:
-                    continue
-
-                # 发送主动聊天消息
-                prompt = self._config.proactive.prompt.strip()
-                if prompt:
-                    logger.info("Sending proactive chat message")
-                    # 系统提示按可见性路由（chat 开则进历史，关则 pet 弹气泡）
-                    self._route_out_message(prompt, role="system")
-                    await self.on_platform_message({
-                        "text": prompt,
-                        "is_proactive": True,
-                    })
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.exception("Error in proactive loop")
-                self._route_out_message(f"主动聊天出错：{exc}", role="error")
-                await asyncio.sleep(5)
 
     def _route_out_message(
         self,

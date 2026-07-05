@@ -28,8 +28,8 @@ class DesktopPetConfig(BaseConfig):
         normal1_image: str = Field(default="", description="闭嘴/静止状态图片路径", label="闭嘴状态图", tag="file")
         normal2_image: str = Field(default="", description="张嘴状态图片路径", label="张嘴状态图", tag="file")
         sleep_image: str = Field(default="", description="睡眠状态图片路径", label="睡眠状态图", tag="file")
-        pet_width: int = Field(default=200, description="桌宠宽度", label="宽度", tag="performance", ge=64, le=1024)
-        pet_height: int = Field(default=200, description="桌宠高度", label="高度", tag="performance", ge=64, le=1024)
+        pet_width: int = Field(default=200, description="桌宠宽度基准值（实际按屏幕面积 1% 比例自动缩放，此值仅作 fallback）", label="宽度", tag="performance", ge=64, le=1024)
+        pet_height: int = Field(default=200, description="桌宠高度基准值（实际按屏幕面积 1% 比例自动缩放，此值仅作 fallback）", label="高度", tag="performance", ge=64, le=1024)
         default_image: str = Field(
             default="assets/default_pet.svg",
             description="默认图片路径（兜底，相对于插件目录；支持 SVG 矢量图，推荐使用 SVG 以获得高 DPI 清晰度）",
@@ -171,25 +171,10 @@ class DesktopPetConfig(BaseConfig):
             tag="ai",
         )
 
-    @config_section("proactive", title="主动聊天", tag="ai")
-    class ProactiveSection(SectionBase):
-        """主动聊天配置"""
-        enabled: bool = Field(default=True, description="启用定时主动聊天", label="启用主动聊天", tag="ai")
-        interval: int = Field(default=1800, description="主动聊天间隔时间（秒）", label="主动聊天间隔", tag="timer", ge=60)
-        prompt: str = Field(
-            default="（系统提醒：已经有一段时间没有和用户交流了，请根据当前时间和上下文，主动寻找一个合适的话题与用户聊天。注意不要过于刻意，保持自然。）",
-            description="主动聊天提示词",
-            label="主动聊天提示词",
-            tag="ai",
-            input_type="textarea",
-            rows=4,
-        )
-
     plugin: PluginSection = Field(default_factory=PluginSection)
     pet: PetSection = Field(default_factory=PetSection)
     sleep: SleepSection = Field(default_factory=SleepSection)
     system_monitor: SystemMonitorSection = Field(default_factory=SystemMonitorSection)
     clipboard: ClipboardSection = Field(default_factory=ClipboardSection)
     chat: ChatSection = Field(default_factory=ChatSection)
-    proactive: ProactiveSection = Field(default_factory=ProactiveSection)
     screen_watcher: ScreenWatcherSection = Field(default_factory=ScreenWatcherSection)

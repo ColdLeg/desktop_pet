@@ -4,7 +4,6 @@
 提供 QSystemTrayIcon 及右键上下文菜单，包含：
 - 显示/隐藏 切换
 - 日/夜模式切换（占位）
-- 系统信息显示（占位）
 - 设置快捷方式（占位）
 - 退出
 
@@ -96,15 +95,6 @@ class TrayManager(QObject):
             with_quit_confirm: 退出时是否弹确认对话框（托盘场景通常需要，
                 右键桌宠场景也可保持一致）。
         """
-        # 显示/隐藏宠物
-        self._show_action = QAction("显示宠物", self)
-        self._show_action.triggered.connect(self.action_show.emit)
-        menu.addAction(self._show_action)
-
-        self._hide_action = QAction("隐藏宠物", self)
-        self._hide_action.triggered.connect(self.action_hide.emit)
-        menu.addAction(self._hide_action)
-
         # 聊天
         chat_action = QAction("聊天...", self)
         chat_action.triggered.connect(self.action_chat.emit)
@@ -157,14 +147,10 @@ class TrayManager(QObject):
 
         menu.addSeparator()
 
-        # 日夜/系统信息
+        # 日夜模式
         daynight_action = QAction("切换日/夜模式", self)
         daynight_action.triggered.connect(self.action_toggle_daynight.emit)
         menu.addAction(daynight_action)
-
-        info_action = QAction("系统信息...", self)
-        info_action.triggered.connect(self.action_show_info.emit)
-        menu.addAction(info_action)
 
         menu.addSeparator()
 
