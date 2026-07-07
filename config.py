@@ -30,6 +30,8 @@ class DesktopPetConfig(BaseConfig):
         sleep_image: str = Field(default="", description="睡眠状态图片路径", label="睡眠状态图", tag="file")
         pet_width: int = Field(default=200, description="桌宠宽度基准值（实际按屏幕面积 1% 比例自动缩放，此值仅作 fallback）", label="宽度", tag="performance", ge=64, le=1024)
         pet_height: int = Field(default=200, description="桌宠高度基准值（实际按屏幕面积 1% 比例自动缩放，此值仅作 fallback）", label="高度", tag="performance", ge=64, le=1024)
+        position_x: int = Field(default=-1, description="桌宠窗口 X 坐标（-1 表示未设置，启动时居中或上次位置）", label="位置 X", tag="general", ge=-1, le=65535)
+        position_y: int = Field(default=-1, description="桌宠窗口 Y 坐标（-1 表示未设置，启动时居中或上次位置）", label="位置 Y", tag="general", ge=-1, le=65535)
         default_image: str = Field(
             default="assets/default_pet.svg",
             description="默认图片路径（兜底，相对于插件目录；支持 SVG 矢量图，推荐使用 SVG 以获得高 DPI 清晰度）",
@@ -172,11 +174,23 @@ class DesktopPetConfig(BaseConfig):
         )
         font_size_scale: float = Field(
             default=1.0,
-            description="字号缩放因子（1.0=默认 12px；0.8=偏小；1.25=偏大；1.5=大）。可在托盘菜单热切换。",
+            description="字号缩放因子（1.0=默认 12px；0.8=偏小；1.25=偏大；1.5=大）。可在托盘菜单热切换，也可在此滑块精细调节。",
             label="字号缩放",
             tag="general",
             ge=0.5,
             le=2.0,
+            input_type="slider",
+            step=0.05,
+        )
+        opacity: float = Field(
+            default=1.0,
+            description="窗口透明度（0.1~1.0）。托盘菜单切换透明度时自动记忆。",
+            label="窗口透明度",
+            tag="general",
+            ge=0.1,
+            le=1.0,
+            input_type="slider",
+            step=0.05,
         )
 
     @config_section("screen_watcher", title="屏幕监控", tag="ai")

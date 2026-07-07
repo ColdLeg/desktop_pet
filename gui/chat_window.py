@@ -181,6 +181,22 @@ class ChatWindow(QWidget):
         #scroll_content {{
             background: transparent;
         }}
+        /* 气泡内 label 字号统一由 QSS 控制（切换字号时全局刷新） */
+        #scroll_content QLabel#bubble_reply {{
+            font-size: {max(7, int(9 * fs))}px;
+        }}
+        #scroll_content QLabel#bubble_sender {{
+            font-size: {max(7, int(10 * fs))}px;
+            font-weight: 600;
+        }}
+        #scroll_content QLabel#bubble_system {{
+            font-size: {max(8, int(11 * fs))}px;
+            font-style: italic;
+        }}
+        #scroll_content QLabel#bubble_text {{
+            font-size: {max(8, int(12 * fs))}px;
+            font-family: {ff_mono};
+        }}
         #input_bar {{
             background-color: rgba({_hex_to_rgb_tuple(t.surface_container_low)}, 0.8);
             border-bottom-left-radius: {int(16 * s)}px;
@@ -467,25 +483,21 @@ class ChatWindow(QWidget):
         # 回复标记（仅 bot 气泡且带 reply_to 时显示）
         if reply_to and role not in ("user", "system"):
             reply_label = QLabel(f"↩ 回复消息 {reply_to[:8]}")
+            reply_label.setObjectName("bubble_reply")
             reply_label.setStyleSheet(
-                f"color: {t.accent}; font-size: {max(7, int(9 * s * self._font_scale))}px;"
-                f" background: transparent; font-family: {self._font_ui};"
+                f"color: {t.accent}; background: transparent;"
             )
             layout.addWidget(reply_label)
 
         if role == "system":
             msg = QLabel(text)
+            msg.setObjectName("bubble_system")
             msg.setWordWrap(True)
             msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
             msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             msg.setTextFormat(Qt.TextFormat.PlainText)
-            sys_font = QFont()
-            sys_font.setFamilies(self._font_ui.split(","))
-            sys_font.setPixelSize(max(8, int(11 * s * self._font_scale)))
-            msg.setFont(sys_font)
             msg.setStyleSheet(
                 f"color: {t.bubble_system_fg}; background: transparent;"
-                f" font-style: italic;"
             )
             layout.addWidget(msg)
             bubble.setStyleSheet(
@@ -495,11 +507,7 @@ class ChatWindow(QWidget):
             bubble.setFixedWidth(int(340 * s))
         else:
             sender = QLabel(label)
-            sender_font = QFont()
-            sender_font.setFamilies(self._font_ui.split(","))
-            sender_font.setPixelSize(max(7, int(10 * s * self._font_scale)))
-            sender_font.setBold(True)
-            sender.setFont(sender_font)
+            sender.setObjectName("bubble_sender")
             sender.setStyleSheet(
                 "background: transparent;"
             )
@@ -508,14 +516,11 @@ class ChatWindow(QWidget):
             # 文本（若有）
             if text:
                 msg = QLabel(text)
+                msg.setObjectName("bubble_text")
                 msg.setWordWrap(True)
                 msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
                 msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 msg.setTextFormat(Qt.TextFormat.PlainText)
-                txt_font = QFont()
-                txt_font.setFamilies(self._font_mono.split(","))
-                txt_font.setPixelSize(max(8, int(12 * s * self._font_scale)))
-                msg.setFont(txt_font)
                 msg.setStyleSheet("background: transparent;")
                 layout.addWidget(msg)
 

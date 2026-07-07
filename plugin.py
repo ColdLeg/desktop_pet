@@ -338,6 +338,13 @@ class DesktopPetAdapter(BaseAdapter):
 
             # 构建主窗口
             pet_window = PetWindow(config=self._config)
+            # 恢复上次保存的坐标（未设置则用默认/居中）
+            cfg = self._config
+            if cfg:
+                px = int(getattr(cfg.pet, "position_x", -1) or -1)
+                py = int(getattr(cfg.pet, "position_y", -1) or -1)
+                if px >= 0 and py >= 0:
+                    pet_window.move(px, py)
             pet_window.show()
 
             # 构建托盘
@@ -359,6 +366,20 @@ class DesktopPetAdapter(BaseAdapter):
             def _apply_opacity(opacity: float) -> None:
                 pet_window.set_opacity(opacity)
                 chat_window.setWindowOpacity(opacity)
+                # 持久化透明度
+                try:
+                    cfg_o = self._config
+                    if cfg_o and getattr(cfg_o, "theme", None):
+                        cfg_o.theme.opacity = float(opacity)
+                        self._save_config()
+                except Exception:
+                    pass
+            # 启动时恢复上次透明度
+            if self._config and getattr(self._config, "theme", None):
+                _op = float(getattr(self._config.theme, "opacity", 1.0) or 1.0)
+                if 0 < _op < 1.0:
+                    pet_window.set_opacity(_op)
+                    chat_window.setWindowOpacity(_op)
             tray_manager.action_set_opacity.connect(_apply_opacity)
 
             # 聊天位置模式（运行时切换配置）
@@ -366,6 +387,8 @@ class DesktopPetAdapter(BaseAdapter):
                 try:
                     if self._config and getattr(self._config, "chat", None):
                         self._config.chat.chat_position_mode = mode
+                        # 持久化位置模式
+                        self._save_config()
                 except Exception:
                     logger.exception("Failed to set chat_position_mode")
             tray_manager.action_set_chat_position_mode.connect(_apply_chat_position_mode)
@@ -381,11 +404,7 @@ class DesktopPetAdapter(BaseAdapter):
                     pet_window.apply_theme(cfg)
                     chat_window.apply_theme(cfg)
                     # 持久化
-                    try:
-                        if hasattr(self._plugin, "save_config"):
-                            self._plugin.save_config()
-                    except Exception:
-                        pass
+                    self._save_config()
                     logger.info(f"Theme switched to: {preset}")
                 except Exception:
                     logger.exception("Failed to apply theme")
@@ -402,11 +421,7 @@ class DesktopPetAdapter(BaseAdapter):
                     pet_window.apply_theme(cfg)
                     chat_window.apply_theme(cfg)
                     # 持久化
-                    try:
-                        if hasattr(self._plugin, "save_config"):
-                            self._plugin.save_config()
-                    except Exception:
-                        pass
+                    self._save_config()
                     logger.info(f"Font scale set to: {scale}")
                 except Exception:
                     logger.exception("Failed to apply font scale")
@@ -467,12 +482,8 @@ class DesktopPetAdapter(BaseAdapter):
                     if cfg and getattr(cfg.chat, "persist_chat_offset", False):
                         cfg.chat.chat_offset_x = int(offset.x())
                         cfg.chat.chat_offset_y = int(offset.y())
-                        # 尝试持久化（如果 config 支持 save）
-                        try:
-                            if hasattr(self._plugin, "save_config"):
-                                self._plugin.save_config()
-                        except Exception:
-                            pass
+                        # 持久化偏移
+                        self._save_config()
                 except Exception:
                     logger.exception("Failed to record chat offset")
 
@@ -491,6 +502,24 @@ class DesktopPetAdapter(BaseAdapter):
                 pet_window.position_chat_window_default(chat_window)
 
             pet_window.pet_moved_delta.connect(_on_pet_moved_delta)
+
+            # 拖动桌宠时（防抖）持久化坐标，下次启动恢复
+            _pos_save_timer = QTimer()
+            _pos_save_timer.setSingleShot(True)
+            _pos_save_timer.setInterval(800)
+            def _save_pet_position() -> None:
+                try:
+                    cfg_p = self._config
+                    if not cfg_p or not getattr(cfg_p, "pet", None):
+                        return
+                    pos = pet_window.pos()
+                    cfg_p.pet.position_x = int(pos.x())
+                    cfg_p.pet.position_y = int(pos.y())
+                    self._save_config()
+                except Exception:
+                    pass
+            _pos_save_timer.timeout.connect(_save_pet_position)
+            pet_window.pet_moved.connect(_pos_save_timer.start)
 
             # 定时器轮询 out_queue（适配器 -> GUI 消息）
             poll_timer = QTimer()
@@ -905,6 +934,27 @@ class DesktopPetAdapter(BaseAdapter):
             logger.warning("StreamManager has no add_sent_message_to_history; skip write-back")
 
     # ---- 主动消息投递（供 services 调用） ----
+
+    def _save_config(self) -> None:
+        """把当前运行时配置持久化到 config.toml。
+
+        框架 BasePlugin 无 save_config 方法，需用 kernel 的
+        _render_toml_with_signature 渲染当前 config 实例为 toml 文本后写回文件。
+        """
+        try:
+            from src.kernel.config.core import _render_toml_with_signature
+            if not self._config:
+                return
+            path = DesktopPetConfig.get_default_path()
+            if not path:
+                return
+            data = self._config.model_dump()
+            toml_text = _render_toml_with_signature(DesktopPetConfig, data)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(toml_text, encoding="utf-8")
+            logger.debug(f"Config saved to {path}")
+        except Exception:
+            logger.exception("Failed to save config")
 
     def enqueue_proactive_message(self, text: str, *, source: str = "system") -> None:
         """把服务产生的主动消息投递到 in_queue，走完整 sub+actor 链路。
