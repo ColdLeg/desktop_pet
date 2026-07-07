@@ -91,6 +91,26 @@
 | `chat_offset_x` | int | 0 | 聊天窗口相对桌宠的 X 偏移 |
 | `chat_offset_y` | int | 0 | 聊天窗口相对桌宠的 Y 偏移 |
 
+### 配色与字体 `[theme]`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `preset` | str | `mofox_blue` | 配色预设：`mofox_blue`（淡蓝#9EF6FF+纯白+深色背景）/ `mofox_blue_light`（淡蓝浅色版）/ `ocean`（海洋深蓝）/ `forest`（森林绿）/ `sunset`（日落橙）/ `custom`（自定义） |
+| `custom_primary` | str | `#9EF6FF` | 自定义主色 #RRGGBB（仅 preset=custom 时生效） |
+| `custom_surface` | str | `#0F1416` | 自定义背景色 #RRGGBB（仅 preset=custom 时生效） |
+| `font_family_mono` | str | `""` | 英文等宽编程字体族（默认 JetBrains Mono，GitHub 高 star 开源等宽字体，支持连字）。留空用默认链 |
+| `font_family_cjk` | str | `""` | 中文字体族（默认 Ubuntu，即 Ubuntu 终端默认字体）。留空用默认链 |
+
+**配色方案**：
+- 默认 `mofox_blue` 采用 `print_all_logs` 边框色 `#9EF6FF` 淡蓝 + 纯白文字 + 深色背景，与调试日志视觉统一。
+- `custom` 模式：用户提供 primary/surface 两个关键色，自动推导完整 MD3 token 集（容器色阶、前景对比色、错误色等）。
+- 运行时可通过托盘菜单「配色方案」切换，实时刷新所有 GUI 窗口并持久化。
+
+**字体方案**：
+- 英文等宽：JetBrains Mono（GitHub star 数高的开源等宽编程字体，支持连字），回退链 Cascadia Code → Fira Code → Consolas。
+- 中文：Ubuntu（用户指定，Ubuntu 终端默认字体），回退链 Microsoft YaHei → Noto Sans CJK SC。
+- 可在配置中自定义字体族名。
+
 ### 屏幕监控 `[screen_watcher]`
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -142,20 +162,22 @@ desktop_pet/
 ├── __init__.py          # 包初始化，导出 __version__
 ├── manifest.json        # 插件清单（入口点、依赖）
 ├── plugin.py            # DesktopPetAdapter + DesktopPetPlugin
-├── config.py            # DesktopPetConfig，含 7 个配置分区
+├── config.py            # DesktopPetConfig，含 8 个配置分区（含 theme）
 ├── README.md            # 本文件
 ├── gui/
 │   ├── __init__.py      # 导出 PetWindow、ChatWindow、TrayManager、DialogBox
-│   ├── pet_window.py    # 透明、无边框、置顶窗口；多屏支持；截图
-│   ├── chat_window.py   # MD3 暗色聊天窗口；消息气泡；表情包渲染；延迟构建消息区
-│   ├── dialog_box.py    # 打字机风格对话气泡；加速隐藏
-│   └── tray_menu.py     # 系统托盘图标和右键菜单
+│   ├── theme.py         # MD3 配色 token 系统 + 字体方案（预设/自定义）
+│   ├── svg_assets.py    # 内置 SVG 资源（桌宠形象 + 托盘图标）
+│   ├── pet_window.py    # 透明、无边框、置顶窗口；SVG 矢量；智能上下/左右定位
+│   ├── chat_window.py   # MD3 暗色聊天窗口；主题配色；等宽/Ubuntu 字体
+│   ├── dialog_box.py    # MD3 打字机风格对话气泡；主题配色
+│   └── tray_menu.py     # 系统托盘（内置 SVG 图标）+ 配色方案切换
 └── services/
     ├── __init__.py      # 导出所有服务
-    ├── day_night.py     # 日/夜循环服务 + reminder 注入
-    ├── system_monitor.py # CPU/内存监控服务 + reminder 注入
-    ├── clipboard_watcher.py # 剪贴板变化检测服务 + reminder 注入
-    └── screen_watcher.py # 定时截图 VLM 识别服务 + reminder 注入
+    ├── day_night.py     # 日/夜循环服务（定时检查 + reminder 注入）
+    ├── system_monitor.py # CPU/内存监控服务（非阻塞 to_thread）
+    ├── clipboard_watcher.py # 剪贴板检测（source 区分 + 主动消息投递）
+    └── screen_watcher.py # 定时截图 VLM 识别服务
 ```
 
 ## 开发
@@ -199,6 +221,37 @@ desktop_pet/
 #### 修复 screen_watcher recognize_media 调用签名不匹配
 - `_recognize_with_vlm` 方法：读取图片数据 → `base64_encode_bytes` 编码 → 调用 `recognize_media(base64_data, media_type="image")`
 - 去掉不存在的 `prompt=` 关键字参数，修复 `TypeError`
+
+## 更新日志
+
+### 2026-07-07
+
+#### 全面 UI 翻新（MD3 风格 + SVG 矢量 + 自定义配色/字体）
+- 新增 `gui/theme.py`：Material Design 3 配色 token 系统 + 字体方案
+  - 5 套预设（mofox_blue 默认 / mofox_blue_light / ocean / forest / sunset）
+  - custom 自定义模式：用户提供 primary/surface 两色，自动推导完整 MD3 token
+  - 默认采用 print_all_logs 边框色 `#9EF6FF` 淡蓝 + 纯白文字
+- 新增 `gui/svg_assets.py`：内置 SVG 资源（桌宠形象 + 托盘图标），消除 PNG 依赖
+- 重写 `gui/dialog_box.py`：MD3 圆角气泡 + 主题配色 + 等宽/Ubuntu 字体
+- 重写 `gui/pet_window.py`：SVG 矢量渲染 + 智能上下/左右位置算法
+  - `_compute_placement`：上下空间充足且左右不足→垂直；否则水平
+- 重写 `gui/chat_window.py`：MD3 暗色 + 主题 token + 字体系统
+  - 修复 `load_history` 与延迟构建的兼容（show_chat_messages=False 时历史不再丢失）
+- 重写 `gui/tray_menu.py`：内置 SVG 托盘图标 + 配色方案子菜单（运行时切换）
+- 新增 `theme` 配置分区（preset/custom_primary/custom_surface/font_family_mono/font_family_cjk）
+
+#### 主动消息来源区分（剪贴板 vs 截图）
+- `from_platform_message` 新增 `source="clipboard"` 路由，与 `source="screenshot"` 严格区分
+- `services/clipboard_watcher.py` 新增 `bind_adapter` + 主动消息投递（source="clipboard"）
+- adapter 新增 `enqueue_proactive_message(text, source)` 公开方法
+
+#### Bug 修复
+- 修复 `DayNightService` 跨昼夜边界不注入 reminder（新增定时循环每 10 分钟检查）
+- 修复 `plugin_version` 0.1.0 → 0.2.0（版本一致性）
+- 修复 `load_history` 在 show_chat_messages=False 时历史丢失
+- 修复托盘「切换日/夜模式」信号悬空：改为 `action_toggle_theme` 并连接主题刷新
+- 修复 `SystemMonitorService` 阻塞调用：psutil 用 asyncio.to_thread 包裹
+- manifest 补充 `Pillow>=9.0.0` 依赖声明
 
 ## 📄 开源协议
 

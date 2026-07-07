@@ -1,10 +1,12 @@
-"""打字机风格对话气泡控件。
+# -*- coding: utf-8 -*-
+"""打字机风格对话气泡控件（MD3 风格）。
 
-提供带对话气泡样式的对话框，具有：
+提供 MD3 风格的对话气泡，具有：
 - 打字机效果（逐字显示）
-- 可配置的字体大小、最大宽度和打字速度（硬编码默认值）
-- 可配置超时后自动隐藏（从 config 读取 dialog_auto_hide_sec）
-- 半透明圆角矩形背景
+- 字体大小、最大宽度从 config.theme 读取，回退硬编码默认
+- 可配置超时后自动隐藏（config.chat.dialog_auto_hide_sec）
+- 圆角矩形 + 主题配色（与 ChatWindow 同源 theme token）
+- 等宽 + Ubuntu 中文字体
 """
 
 from __future__ import annotations
@@ -15,22 +17,24 @@ from PySide6.QtCore import QPropertyAnimation, QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from .theme import get_font_family, get_theme
+
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
 
 
 class DialogBox(QWidget):
-    """打字机风格的对话气泡，超时后自动隐藏。
+    """打字机风格的 MD3 对话气泡，超时后自动淡出隐藏。
 
-    逐字显示文本，然后在可配置的延迟后淡出。
-    自动隐藏时间从 config.chat.dialog_auto_hide_sec 读取。
+    配色从 config.theme 读取（与 ChatWindow 共享 token）；
+    字体采用等宽编程字体（JetBrains Mono）+ Ubuntu 中文字体组合。
     """
 
-    # 硬编码默认值（不从配置加载）
+    # 硬编码默认值（config 无 theme 时回退）
     FONT_SIZE = 14
-    MAX_WIDTH = 250
-    TYPING_SPEED_MS = 50
-    AUTO_HIDE_SEC = 5.0
+    MAX_WIDTH = 280
+    TYPING_SPEED_MS = 45
+    AUTO_HIDE_SEC = 10.0
 
     def __init__(
         self,
@@ -41,12 +45,16 @@ class DialogBox(QWidget):
 
         Args:
             parent: 父级控件（通常是 PetWindow）。
-            config: 用于读取 dialog_auto_hide_sec 配置；为 None 时使用硬编码默认值。
+            config: 用于读取 theme（配色/字体）与 dialog_auto_hide_sec。
         """
         super().__init__(parent)
         self._config = config
 
-        # 从 config 读取自动隐藏时间，回退到硬编码默认值
+        # 主题
+        self._theme = get_theme(config)
+        self._font_family = get_font_family(config, kind="bubble")
+
+        # 自动隐藏时间
         if config:
             self._auto_hide_sec: float = float(
                 getattr(config.chat, "dialog_auto_hide_sec", self.AUTO_HIDE_SEC)
@@ -62,12 +70,15 @@ class DialogBox(QWidget):
         self._fade_animation: QPropertyAnimation | None = None
         self._accelerated: bool = False
 
-        # --- 设置 ---
         self._build_ui()
 
     def _build_ui(self) -> None:
         """构建对话框控件。"""
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
@@ -76,34 +87,53 @@ class DialogBox(QWidget):
         self._label.setMaximumWidth(self.MAX_WIDTH)
         self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-        font = QFont("Microsoft YaHei", self.FONT_SIZE)
+        font = QFont()
+        font.setFamilies(self._font_family.split(","))
+        font.setPointSize(self.FONT_SIZE)
         self._label.setFont(font)
 
-        # 样式：白色文字，半透明深色背景
+        t = self._theme
+        # MD3 风格：圆角 16px，surface 容器色，文字 on_surface
         self._label.setStyleSheet(
-            "background-color: rgba(40, 40, 50, 200);"
-            "color: white;"
-            "padding: 10px;"
-            "border-radius: 8px;"
+            f"background-color: {t.dialog_bg};"
+            f"color: {t.dialog_fg};"
+            "padding: 10px 14px;"
+            "border-radius: 16px;"
+            f"border: 1px solid {t.outline_variant};"
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self._label)
 
         self.adjustSize()
         self.hide()
 
+    # ---- 主题刷新 ----
+
+    def apply_theme(self, config: "DesktopPetConfig | None") -> None:
+        """运行时切换主题时重新应用配色与字体。"""
+        self._config = config
+        self._theme = get_theme(config)
+        self._font_family = get_font_family(config, kind="bubble")
+        t = self._theme
+        font = QFont()
+        font.setFamilies(self._font_family.split(","))
+        font.setPointSize(self.FONT_SIZE)
+        self._label.setFont(font)
+        self._label.setStyleSheet(
+            f"background-color: {t.dialog_bg};"
+            f"color: {t.dialog_fg};"
+            "padding: 10px 14px;"
+            "border-radius: 16px;"
+            f"border: 1px solid {t.outline_variant};"
+        )
+        self.update()
+
     # ---- 公开 API ----
 
     def show_text(self, text: str) -> None:
-        """以打字机效果显示文本。
-
-        开始前重置所有正在进行的打字或隐藏计时器。
-
-        Args:
-            text: 要显示的文本。
-        """
+        """以打字机效果显示文本。"""
         self._stop_all_timers()
 
         self._full_text = text
@@ -121,12 +151,8 @@ class DialogBox(QWidget):
             self._label.setText(text)
             self.adjustSize()
 
-    def hide_with_fade(self, duration_ms: int = 500) -> None:
-        """在指定毫秒数内淡出对话框。
-
-        Args:
-            duration_ms: 淡出持续时间（毫秒）。
-        """
+    def hide_with_fade(self, duration_ms: int = 400) -> None:
+        """在指定毫秒数内淡出对话框。"""
         if self._fade_animation and self._fade_animation.state() == QPropertyAnimation.State.Running:
             self._fade_animation.stop()
 
@@ -168,18 +194,15 @@ class DialogBox(QWidget):
         """加速隐藏：把剩余 auto_hide 时间减半。
 
         用于 chat_window 打开时，让 pet 气泡更快消失。
-        如果打字机仍在进行，跳过到完整文本并重启更短的隐藏计时。
         """
         if not self.isVisible():
             return
         self._accelerated = True
-        # 跳过打字机
         if self._typing_timer and self._typing_timer.isActive():
             self._typing_timer.stop()
             self._label.setText(self._full_text)
             self._current_index = len(self._full_text)
             self.adjustSize()
-        # 重启更短的隐藏计时（原时长的一半）
         if self._auto_hide_sec > 0:
             if self._hide_timer and self._hide_timer.isActive():
                 self._hide_timer.stop()

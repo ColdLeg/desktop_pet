@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""桌面宠物的系统托盘管理器。
+"""桌面宠物的系统托盘管理器（MD3 风格 + 内置 SVG 图标）。
 
 提供 QSystemTrayIcon 及右键上下文菜单，包含：
 - 显示/隐藏 切换
-- 日/夜模式切换（占位）
-- 设置快捷方式（占位）
+- 配色方案切换（运行时切换主题预设）
+- 聊天位置模式切换
+- 透明度
 - 退出
 
-同时通过 Qt 信号广播托盘事件供适配器消费。
+图标优先用配置的 default_image（SVG），否则用内置 TRAY_ICON_SVG，彻底消除 PNG 依赖。
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QMessageBox
 
+from .svg_assets import TRAY_ICON_SVG
+from .theme import PRESET_NAMES
+
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
 
@@ -27,20 +31,19 @@ class TrayManager(QObject):
     """系统托盘图标和上下文菜单管理器。
 
     信号：
-        action_show: 用户想要显示宠物窗口时触发。
-        action_hide: 用户想要隐藏宠物窗口时触发。
-        action_chat: 用户请求打开聊天窗口时触发。
-        action_toggle_daynight: 用户切换日/夜模式时触发。
-        action_show_info: 用户请求系统信息时触发。
-        action_quit: 用户选择退出时触发。
+        action_show / action_hide: 显示/隐藏宠物窗口
+        action_chat / action_chat_hide: 聊天窗口开关
+        action_toggle_theme: 切换配色主题（参数：preset 名）
+        action_quit: 退出
+        action_set_opacity(float): 透明度
+        action_set_chat_position_mode(str): 聊天位置模式
     """
 
     action_show = Signal()
     action_hide = Signal()
     action_chat = Signal()
     action_chat_hide = Signal()
-    action_toggle_daynight = Signal()
-    action_show_info = Signal()
+    action_toggle_theme = Signal(str)
     action_quit = Signal()
     action_set_opacity = Signal(float)
     action_set_chat_position_mode = Signal(str)
@@ -55,16 +58,9 @@ class TrayManager(QObject):
         config: DesktopPetConfig | None = None,
         parent: QObject | None = None,
     ) -> None:
-        """初始化托盘管理器。
-
-        Args:
-            config: 插件配置；用于图标路径解析。
-            parent: 父级 QObject。
-        """
         super().__init__(parent)
         self._config = config
 
-        # --- 状态 ---
         self._tray_icon: QSystemTrayIcon | None = None
 
         if self.SHOW_ICON:
@@ -87,13 +83,7 @@ class TrayManager(QObject):
     def build_menu(self, menu: QMenu, *, with_quit_confirm: bool = True) -> None:
         """把共用菜单项填入指定 menu。
 
-        托盘菜单和桌宠右键菜单都复用此方法，保证菜单项一致。
-        子菜单：透明度、Pet/Chat 也一并加入。
-
-        Args:
-            menu: 要填充的 QMenu。
-            with_quit_confirm: 退出时是否弹确认对话框（托盘场景通常需要，
-                右键桌宠场景也可保持一致）。
+        托盘菜单和桌宠右键菜单都复用此方法。子菜单：透明度、Pet/Chat、配色。
         """
         # 聊天
         chat_action = QAction("聊天...", self)
@@ -145,12 +135,22 @@ class TrayManager(QObject):
         )
         petchat_menu.addAction(mode_follow)
 
-        menu.addSeparator()
-
-        # 日夜模式
-        daynight_action = QAction("切换日/夜模式", self)
-        daynight_action.triggered.connect(self.action_toggle_daynight.emit)
-        menu.addAction(daynight_action)
+        # 配色子菜单
+        theme_menu = menu.addMenu("配色方案")
+        current_preset = self._current_theme_preset()
+        for name in PRESET_NAMES:
+            label = self._theme_label(name)
+            act = QAction(label, theme_menu)
+            act.setCheckable(True)
+            act.setChecked(name == current_preset)
+            act.triggered.connect(lambda checked=False, n=name: self.action_toggle_theme.emit(n))
+            theme_menu.addAction(act)
+        # 自定义（打开说明）
+        custom_act = QAction("自定义配色（编辑配置）", theme_menu)
+        custom_act.setCheckable(True)
+        custom_act.setChecked(current_preset == "custom")
+        custom_act.triggered.connect(lambda checked=False: self.action_toggle_theme.emit("custom"))
+        theme_menu.addAction(custom_act)
 
         menu.addSeparator()
 
@@ -162,6 +162,25 @@ class TrayManager(QObject):
             quit_action.triggered.connect(self.action_quit.emit)
             quit_action.triggered.connect(QApplication.quit)
         menu.addAction(quit_action)
+
+    def _theme_label(self, name: str) -> str:
+        """配色预设的中文名。"""
+        return {
+            "mofox_blue": "MoFox 淡蓝（默认）",
+            "mofox_blue_light": "MoFox 淡蓝-浅色",
+            "ocean": "海洋深蓝",
+            "forest": "森林绿",
+            "sunset": "日落橙",
+        }.get(name, name)
+
+    def _current_theme_preset(self) -> str:
+        """读取当前配色预设。"""
+        try:
+            if self._config and getattr(self._config, "theme", None):
+                return getattr(self._config.theme, "preset", "mofox_blue") or "mofox_blue"
+        except Exception:
+            pass
+        return "mofox_blue"
 
     def _current_chat_position_mode(self) -> str:
         """读取当前聊天位置模式配置。"""
@@ -176,17 +195,15 @@ class TrayManager(QObject):
     def _create_icon(self) -> QIcon:
         """创建托盘图标。
 
-        SVG 走矢量渲染，位图走 QPixmap 兜底；失败则返回空图标。
-
-        Returns:
-            QIcon 实例。
+        优先级：配置 default_image(SVG) → 内置 TRAY_ICON_SVG → 位图兜底 → 空图标。
+        全程无 PNG 依赖。
         """
+        # 1) 配置的 SVG 文件
         icon_path = self._resolve_icon_path()
         if icon_path:
             suffix = icon_path.lower().rsplit(".", 1)[-1] if "." in icon_path else ""
             if suffix == "svg":
                 icon = QIcon()
-                # 多档尺寸让 QIcon 按需选择，避免高 DPI 下模糊
                 for px in (16, 24, 32, 48, 64):
                     pm = self._render_svg_to_pixmap(icon_path, px)
                     if pm and not pm.isNull():
@@ -197,19 +214,21 @@ class TrayManager(QObject):
                 pixmap = QPixmap(str(icon_path))
                 if not pixmap.isNull():
                     return QIcon(pixmap)
+
+        # 2) 内置 SVG（无文件依赖）
+        icon = QIcon()
+        for px in (16, 24, 32, 48, 64):
+            pm = self._render_svg_bytes_to_pixmap(TRAY_ICON_SVG, px)
+            if pm and not pm.isNull():
+                icon.addPixmap(pm, QIcon.Mode.Normal, QIcon.State.Off)
+        if not icon.isNull():
+            return icon
+
         return QIcon()
 
     @staticmethod
     def _render_svg_to_pixmap(path: str, size_px: int) -> QPixmap | None:
-        """将 SVG 文件渲染为指定物理像素的 QPixmap。
-
-        Args:
-            path: SVG 文件绝对路径。
-            size_px: 目标像素尺寸（宽=高）。
-
-        Returns:
-            QPixmap 或 None（渲染失败时）。
-        """
+        """将 SVG 文件渲染为指定物理像素的 QPixmap。"""
         try:
             renderer = QSvgRenderer(path)
             if not renderer.isValid():
@@ -225,12 +244,26 @@ class TrayManager(QObject):
         except Exception:
             return None
 
-    def _resolve_icon_path(self) -> str | None:
-        """从配置的 default_image 解析托盘图标路径。
+    @staticmethod
+    def _render_svg_bytes_to_pixmap(svg_bytes: bytes, size_px: int) -> QPixmap | None:
+        """将 SVG 字节流渲染为指定物理像素的 QPixmap。"""
+        try:
+            renderer = QSvgRenderer(bytes(svg_bytes))
+            if not renderer.isValid():
+                return None
+            pm = QPixmap(size_px, size_px)
+            pm.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pm)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            renderer.render(painter)
+            painter.end()
+            return pm
+        except Exception:
+            return None
 
-        Returns:
-            绝对路径字符串，或 None。
-        """
+    def _resolve_icon_path(self) -> str | None:
+        """从配置的 default_image 解析托盘图标路径。"""
         if self._config and self._config.pet.default_image:
             from pathlib import Path
 
@@ -244,7 +277,7 @@ class TrayManager(QObject):
     # ---- 公开 API ----
 
     def show(self) -> None:
-        """如果托盘图标已隐藏则显示。"""
+        """显示托盘图标。"""
         if self._tray_icon:
             self._tray_icon.show()
 
@@ -254,21 +287,12 @@ class TrayManager(QObject):
             self._tray_icon.hide()
 
     def set_tooltip(self, text: str) -> None:
-        """更新工具提示文本。
-
-        Args:
-            text: 新的工具提示文本。
-        """
+        """更新工具提示文本。"""
         if self._tray_icon:
             self._tray_icon.setToolTip(text)
 
     def show_notification(self, title: str, message: str) -> None:
-        """显示系统托盘气泡通知。
-
-        Args:
-            title: 通知标题。
-            message: 通知正文。
-        """
+        """显示系统托盘气泡通知。"""
         if self._tray_icon and self._tray_icon.supportsMessages():
             self._tray_icon.showMessage(
                 title,
@@ -280,7 +304,7 @@ class TrayManager(QObject):
     # ---- 内部方法 ----
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        """处理托盘图标激活事件（例如左键单击）。"""
+        """处理托盘图标激活事件。"""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.action_show.emit()
 

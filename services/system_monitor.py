@@ -1,6 +1,8 @@
 """桌面宠物的系统资源监控服务。
 
-使用 psutil 监控 CPU 和内存使用率，当超过用户配置的阈值时记录告警日志。
+使用 psutil 监控 CPU 和内存使用率，当超过用户配置的阈值时注入 system reminder。
+修复：psutil 的阻塞调用（cpu_percent(interval=1)）用 asyncio.to_thread 包裹，
+避免阻塞共享事件循环。
 """
 
 from __future__ import annotations
@@ -25,19 +27,16 @@ if TYPE_CHECKING:
 class SystemMonitorService(BaseService):
     """系统资源监控服务。
 
-    定期检查 CPU 和内存使用率。当超过（config.system_monitor 中的）阈值时记录告警日志。
+    定期检查 CPU 和内存使用率。当超过（config.system_monitor 中的）阈值时
+    注入 desktop_pet_system_status system reminder。
     """
 
     service_name = "system_monitor"
     service_description = "桌面宠物的 CPU/内存使用率监控服务"
-    version = "0.1.0"
+    version = "0.2.0"
 
     def __init__(self, plugin: BasePlugin) -> None:
-        """初始化系统监控服务。
-
-        Args:
-            plugin: 父插件实例。
-        """
+        """初始化系统监控服务。"""
         super().__init__(plugin)
         self._config: DesktopPetConfig | None = None
         self._task: asyncio.Task | None = None
@@ -83,8 +82,10 @@ class SystemMonitorService(BaseService):
 
         while True:
             try:
-                cpu = psutil.cpu_percent(interval=1)
-                mem = psutil.virtual_memory().percent
+                # 用 to_thread 包裹阻塞调用，避免卡住事件循环
+                # cpu_percent(interval=1) 会阻塞约 1 秒
+                cpu = await asyncio.to_thread(psutil.cpu_percent, interval=1)
+                mem = await asyncio.to_thread(lambda: psutil.virtual_memory().percent)
 
                 if cpu > cpu_thresh:
                     self._log.warning(f"High CPU: {cpu:.1f}% (threshold: {cpu_thresh:.1f}%)")
@@ -104,6 +105,8 @@ class SystemMonitorService(BaseService):
                         )
                     except Exception:
                         self._log.error("Failed to inject system_status reminder", exc_info=True)
+            except asyncio.CancelledError:
+                break
             except Exception:
                 self._log.error("System monitor check failed", exc_info=True)
 

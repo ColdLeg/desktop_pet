@@ -2,9 +2,9 @@
     "name": "desktop_pet",
     "display_name": "MoFox 桌宠",
     "version": "0.2.0",
-    "description": "MoFox 桌宠插件 - 将桌面桌宠接入 MoFox 聊天流",
+    "description": "MoFox 桌宠插件 - 将桌面桌宠接入 MoFox 聊天流（MD3 风格 + SVG 矢量 + 自定义配色/字体）",
     "categories": ["fun"],
-    "tags": ["desktop-pet", "gui", "companion", "pyside6"],
+    "tags": ["desktop-pet", "gui", "companion", "pyside6", "material-design-3", "svg"],
     "author": "MoFox Team",
     "dependencies": {
         "plugins": [],
@@ -22,7 +22,8 @@
     "python_dependencies": [
         "PySide6>=6.6.0",
         "psutil>=5.9.0",
-        "pyperclip>=1.8.2"
+        "pyperclip>=1.8.2",
+        "Pillow>=9.0.0"
     ],
     "dependencies_required": true
 }

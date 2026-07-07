@@ -3,10 +3,14 @@
 使用睡眠时间配置分区判断日/夜：
 - 白天：wake_start_hour <= 当前小时 < sleep_start_hour
 - 夜晚：其他情况
+
+修复：添加 asyncio 定时循环，每 CHECK_INTERVAL_SEC 秒主动检查昼夜切换，
+避免应用跨过 sleep_start_hour 边界运行时无人查询导致 reminder 不注入。
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, cast
 
@@ -29,11 +33,15 @@ class DayNightService(BaseService):
 
     根据当前时间和睡眠时间配置（sleep 分区）判断日/夜模式。
     支持手动模式覆盖。
+    通过定时循环主动检测切换，无需依赖外部查询。
     """
 
     service_name = "day_night"
     service_description = "桌面宠物的日/夜循环与问候服务"
-    version = "0.1.0"
+    version = "0.2.0"
+
+    # 定时检查间隔（秒）。600 秒 = 10 分钟，足够捕捉小时级切换。
+    CHECK_INTERVAL_SEC = 600
 
     def __init__(self, plugin: BasePlugin) -> None:
         """初始化日/夜服务。
@@ -45,6 +53,7 @@ class DayNightService(BaseService):
         self._mode: str = "day"
         self._manual_override: bool = False
         self._log = get_logger("desktop_pet.day_night")
+        self._task: asyncio.Task | None = None
         self._update_mode()
 
     def _inject_reminder(self) -> None:
@@ -69,7 +78,10 @@ class DayNightService(BaseService):
         return None
 
     def _update_mode(self) -> None:
-        """根据当前时间更新模式，除非已手动覆盖。"""
+        """根据当前时间更新模式，除非已手动覆盖。
+
+        模式切换时注入 reminder。
+        """
         if self._manual_override:
             return
 
@@ -93,7 +105,20 @@ class DayNightService(BaseService):
 
         # 模式切换时注入 reminder
         if old_mode != self._mode:
+            self._log.info(f"Day/night mode changed: {old_mode} -> {self._mode}")
             self._inject_reminder()
+
+    async def _watch_loop(self) -> None:
+        """定时检查昼夜切换的后台循环。"""
+        try:
+            while True:
+                await asyncio.sleep(self.CHECK_INTERVAL_SEC)
+                # 配置可能运行时变更，每次重新读取
+                self._update_mode()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            self._log.error("Day/night watch loop error", exc_info=True)
 
     @property
     def is_day(self) -> bool:
@@ -113,11 +138,7 @@ class DayNightService(BaseService):
         return self._mode
 
     def get_greeting(self) -> str:
-        """根据当前模式获取合适的问候语。
-
-        Returns:
-            str: 适合白天或夜晚的问候语字符串。
-        """
+        """根据当前模式获取合适的问候语。"""
         self._update_mode()
         if self._mode == "day":
             return "早上好！准备好迎接新的一天！"
@@ -134,6 +155,7 @@ class DayNightService(BaseService):
         """
         self._manual_override = True
         self._mode = "night" if self._mode == "day" else "day"
+        self._inject_reminder()  # 手动切换也注入
         return self._mode
 
     def reset_auto_mode(self) -> None:
@@ -142,11 +164,17 @@ class DayNightService(BaseService):
         self._update_mode()
 
     async def start(self) -> None:
-        """启动日/夜服务（被动服务，无需后台循环）。"""
+        """启动日/夜服务：注入初始状态 + 启动定时检查循环。"""
         self._update_mode()
         # 启动时注入初始状态
         self._inject_reminder()
+        # 启动定时检查循环（主动检测跨边界切换）
+        self._task = asyncio.create_task(self._watch_loop())
+        self._log.info("Day/night service started with periodic check")
 
     async def stop(self) -> None:
-        """停止日/夜服务（被动服务，无需清理）。"""
-        pass
+        """停止日/夜服务：取消定时循环。"""
+        if self._task:
+            self._task.cancel()
+            self._task = None
+            self._log.info("Day/night service stopped")

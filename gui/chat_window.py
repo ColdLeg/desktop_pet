@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
-"""桌宠独立聊天窗口 — Material Design 3 暗色毛玻璃风格。
+"""桌宠独立聊天窗口 — Material Design 3 风格。
 
+配色与字体均从 config.theme 读取（见 gui/theme.py），支持运行时切换。
 提供输入框和发送按钮，用户输入通过 signal 传递给适配器。
-当 show_chat_messages 开启时，同时显示消息气泡。
-采用 MD3 暗色色板与圆角设计，无框半透明窗口，标题栏可拖拽。
+show_chat_messages 开启时同时显示消息气泡；关闭时收到 bot 消息临时展开。
 """
 
 from __future__ import annotations
 
 import os
-
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
@@ -22,6 +21,7 @@ from PySide6.QtCore import (
     QTimer,
     QUrl,
 )
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -40,19 +40,17 @@ try:
 except ImportError:
     _HAS_QSOUND = False
 
+from .theme import get_font_family, get_theme, ColorTokens
+
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
 
 
 class ChatWindow(QWidget):
-    """独立聊天窗口 — MD3 暗色毛玻璃风格。
+    """独立聊天窗口 — MD3 风格。
 
     无框半透明窗口，圆角暗色容器，自定义标题栏可拖拽。
-    show_chat_messages=True 时显示消息气泡，False 时仅输入栏。
-    桌宠回复同时通过 DialogBox 弹出气泡显示。
-
-    信号：
-        message_sent: 用户发送消息时触发，携带消息文本。
+    show_chat_messages=True 时显示消息气泡，False 时仅输入栏（收到 bot 消息临时展开）。
     """
 
     message_sent = Signal(str)
@@ -64,144 +62,33 @@ class ChatWindow(QWidget):
     WIN_HEIGHT = 88
     WIN_HEIGHT_FULL = 480
 
-    # ---- MD3 暗色色板 ----
-    C_SURFACE = "#111318"
-    C_ON_SURFACE = "#e2e2e9"
-    C_SURFACE_CONTAINER = "#1e2024"
-    C_SURFACE_CONTAINER_HIGH = "#282a2f"
-    C_SURFACE_CONTAINER_HIGHEST = "#33343a"
-    C_SURFACE_CONTAINER_LOW = "#1a1b20"
-    C_PRIMARY = "#aec6ff"
-    C_ON_PRIMARY = "#002e68"
-    C_PRIMARY_CONTAINER = "#004494"
-    C_ON_PRIMARY_CONTAINER = "#d9e2ff"
-    C_ON_SURFACE_VARIANT = "#c4c7cf"
-    C_OUTLINE_VARIANT = "#44474e"
-    C_OUTLINE = "#8e9099"
-    C_ERROR = "#ffb4ab"
-
-    QSS = f"""
-        #chat_container {{
-            background-color: rgba(17, 19, 24, 0.96);
-            border-radius: 16px;
-            border: 1px solid {C_SURFACE_CONTAINER_HIGHEST};
-        }}
-        #title_bar {{
-            background-color: rgba(26, 27, 32, 0.8);
-            border-top-left-radius: 16px;
-            border-top-right-radius: 16px;
-            border-bottom: 1px solid {C_SURFACE_CONTAINER_HIGHEST};
-        }}
-        #title_label {{
-            color: {C_ON_SURFACE};
-            font-size: 14px;
-            font-weight: 600;
-            background: transparent;
-        }}
-        #close_btn {{
-            background: transparent;
-            border: none;
-            color: {C_OUTLINE};
-            font-size: 16px;
-            border-radius: 6px;
-        }}
-        #close_btn:hover {{
-            background-color: {C_OUTLINE_VARIANT};
-            color: {C_ERROR};
-        }}
-        #message_scroll {{
-            background: transparent;
-            border: none;
-        }}
-        #scroll_content {{
-            background: transparent;
-        }}
-        #input_bar {{
-            background-color: rgba(26, 27, 32, 0.8);
-            border-bottom-left-radius: 16px;
-            border-bottom-right-radius: 16px;
-            border-top: 1px solid {C_SURFACE_CONTAINER_HIGHEST};
-        }}
-        #input_field {{
-            background-color: {C_SURFACE_CONTAINER};
-            border: 1px solid {C_OUTLINE_VARIANT};
-            border-radius: 12px;
-            color: {C_ON_SURFACE};
-            padding: 8px 12px;
-            font-size: 14px;
-        }}
-        #input_field:focus {{
-            border: 1px solid {C_PRIMARY};
-        }}
-        #send_btn {{
-            background-color: {C_PRIMARY};
-            color: {C_ON_PRIMARY};
-            border: none;
-            border-radius: 18px;
-            font-size: 14px;
-            font-weight: 600;
-        }}
-        #send_btn:hover {{
-            background-color: {C_ON_PRIMARY_CONTAINER};
-        }}
-        #send_btn:pressed {{
-            background-color: {C_PRIMARY_CONTAINER};
-            color: {C_ON_PRIMARY_CONTAINER};
-        }}
-        QScrollBar:vertical {{
-            background: transparent;
-            width: 6px;
-            margin: 0;
-        }}
-        QScrollBar::handle:vertical {{
-            background: {C_OUTLINE_VARIANT};
-            border-radius: 3px;
-            min-height: 30px;
-        }}
-        QScrollBar::handle:vertical:hover {{
-            background: {C_OUTLINE};
-        }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-            height: 0;
-        }}
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-            background: transparent;
-        }}
-    """
-
     def __init__(
         self,
         config: DesktopPetConfig | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        """初始化聊天窗口。
-
-        Args:
-            config: 插件配置，用于读取桌宠名称和用户名称。
-            parent: 父级控件。
-        """
+        """初始化聊天窗口。"""
         super().__init__(parent)
         self._config = config
         self._drag_position: QPoint | None = None
 
-        # 是否显示消息气泡显示区
+        # 主题
+        self._theme: ColorTokens = get_theme(config)
+        self._font_ui = get_font_family(config, kind="ui")
+        self._font_mono = get_font_family(config, kind="mono")
+
         self._show_messages: bool = bool(
             getattr(config.chat, "show_chat_messages", False)
         ) if config else False
 
-        # 消息区是否已延迟构建（_show_messages=False 时初始不构建，
-        # 收到第一条 bot 消息时临时构建并切换窗口尺寸）
         self._messages_built: bool = self._show_messages
         self._size_anim: QPropertyAnimation | None = None
 
         self.setWindowTitle(self.WIN_TITLE)
-        # 按主屏面积 1.8% 计算缩放因子（与 PetWindow 同算法，基准 200x200）
-        # PetWindow 用 1%，ChatWindow 略大一些
         self._scale = self._compute_scale(0.018)
         win_h_base = self.WIN_HEIGHT_FULL if self._show_messages else self.WIN_HEIGHT
         self._win_w = int(self.WIN_WIDTH * self._scale)
         self._win_h = int(win_h_base * self._scale)
-        # 初始用固定尺寸；延迟构建消息区时会用动画过渡到完整高度
         self.setMinimumSize(0, 0)
         self.resize(self._win_w, self._win_h)
         self.setWindowFlags(
@@ -215,14 +102,10 @@ class ChatWindow(QWidget):
 
         self._sound_effect = None
         if _HAS_QSOUND and self._config:
-            sound_path = getattr(
-                self._config.chat, "notification_sound", ""
-            )
+            sound_path = getattr(self._config.chat, "notification_sound", "")
             if sound_path and os.path.isfile(sound_path):
                 self._sound_effect = QSoundEffect(self)
-                self._sound_effect.setSource(
-                    QUrl.fromLocalFile(sound_path)
-                )
+                self._sound_effect.setSource(QUrl.fromLocalFile(sound_path))
                 self._sound_effect.setVolume(0.8)
                 self._sound_effect.setLoopCount(1)
 
@@ -232,16 +115,7 @@ class ChatWindow(QWidget):
 
     @classmethod
     def _compute_scale(cls, area_ratio: float) -> float:
-        """按主屏可用面积比例计算缩放因子。
-
-        factor = sqrt(screen_w * screen_h * ratio) / BASE_PET_SIDE
-
-        Args:
-            area_ratio: 占屏幕面积的比例，与 PetWindow 保持一致。
-
-        Returns:
-            缩放因子（无屏幕信息时返回 1.0）。
-        """
+        """按主屏可用面积比例计算缩放因子。"""
         from PySide6.QtWidgets import QApplication
         import math
         screen = QApplication.primaryScreen()
@@ -254,8 +128,134 @@ class ChatWindow(QWidget):
         if area <= 0:
             return 1.0
         side = math.sqrt(area)
-        # 限制最小缩放因子，避免子控件被压缩到不可见
         return max(0.5, side / cls.BASE_PET_SIDE)
+
+    # ---- 主题 ----
+
+    def _build_qss(self) -> str:
+        """根据当前 theme token 生成 QSS（字号/padding 按缩放因子调整）。"""
+        t = self._theme
+        s = self._scale
+        ff_ui = self._font_ui
+        ff_mono = self._font_mono
+        # 用 {f} 占位，便于整体替换字体族
+        qss = f"""
+        * {{
+            font-family: {ff_ui};
+        }}
+        #chat_container {{
+            background-color: rgba({_hex_to_rgb_tuple(t.surface)}, 0.96);
+            border-radius: {int(16 * s)}px;
+            border: 1px solid {t.surface_container_highest};
+        }}
+        #title_bar {{
+            background-color: rgba({_hex_to_rgb_tuple(t.surface_container_low)}, 0.8);
+            border-top-left-radius: {int(16 * s)}px;
+            border-top-right-radius: {int(16 * s)}px;
+            border-bottom: 1px solid {t.surface_container_highest};
+        }}
+        #title_label {{
+            color: {t.on_surface};
+            font-size: {max(9, int(14 * s))}px;
+            font-weight: 600;
+            background: transparent;
+        }}
+        #close_btn {{
+            background: transparent;
+            border: none;
+            color: {t.outline};
+            font-size: {max(10, int(16 * s))}px;
+            border-radius: {int(6 * s)}px;
+        }}
+        #close_btn:hover {{
+            background-color: {t.outline_variant};
+            color: {t.error};
+        }}
+        #message_scroll {{
+            background: transparent;
+            border: none;
+        }}
+        #scroll_content {{
+            background: transparent;
+        }}
+        #input_bar {{
+            background-color: rgba({_hex_to_rgb_tuple(t.surface_container_low)}, 0.8);
+            border-bottom-left-radius: {int(16 * s)}px;
+            border-bottom-right-radius: {int(16 * s)}px;
+            border-top: 1px solid {t.surface_container_highest};
+        }}
+        #input_field {{
+            background-color: {t.surface_container};
+            border: 1px solid {t.outline_variant};
+            border-radius: {int(12 * s)}px;
+            color: {t.on_surface};
+            padding: {int(8 * s)}px {int(12 * s)}px;
+            font-size: {max(9, int(14 * s))}px;
+            font-family: {ff_mono};
+        }}
+        #input_field:focus {{
+            border: 1px solid {t.primary};
+        }}
+        #send_btn {{
+            background-color: {t.primary};
+            color: {t.on_primary};
+            border: none;
+            border-radius: {int(18 * s)}px;
+            font-size: {max(9, int(14 * s))}px;
+            font-weight: 600;
+        }}
+        #send_btn:hover {{
+            background-color: {t.on_primary_container};
+        }}
+        #send_btn:pressed {{
+            background-color: {t.primary_container};
+            color: {t.on_primary_container};
+        }}
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 6px;
+            margin: 0;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {t.outline_variant};
+            border-radius: 3px;
+            min-height: 30px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {t.outline};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
+        }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: transparent;
+        }}
+        """
+        return qss
+
+    def apply_theme(self, config: "DesktopPetConfig | None") -> None:
+        """运行时切换主题：重新读取 token/字体并重绘 QSS。"""
+        self._config = config
+        self._theme = get_theme(config)
+        self._font_ui = get_font_family(config, kind="ui")
+        self._font_mono = get_font_family(config, kind="mono")
+        # 重应用 QSS
+        self.setStyleSheet(self._build_qss())
+        # 标题字体
+        if hasattr(self, "_title_label") and self._title_label:
+            f = QFont()
+            f.setFamilies(self._font_ui.split(","))
+            f.setPointSize(max(9, int(14 * self._scale)))
+            f.setBold(True)
+            self._title_label.setFont(f)
+        if hasattr(self, "_close_btn") and self._close_btn:
+            f = QFont()
+            f.setFamilies(self._font_ui.split(","))
+            f.setPointSize(max(10, int(16 * self._scale)))
+            self._close_btn.setFont(f)
+        self.update()
+
+    # ---- 构建 UI ----
 
     def _build_ui(self) -> None:
         """构建聊天界面布局。"""
@@ -263,7 +263,6 @@ class ChatWindow(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # --- 暗色圆角容器 ---
         container = QFrame()
         container.setObjectName("chat_container")
         container_layout = QVBoxLayout(container)
@@ -284,8 +283,8 @@ class ChatWindow(QWidget):
         )
         self._title_label = QLabel(title_text)
         self._title_label.setObjectName("title_label")
-        from PySide6.QtGui import QFont
         title_font = QFont()
+        title_font.setFamilies(self._font_ui.split(","))
         title_font.setPointSize(max(9, int(14 * self._scale)))
         title_font.setBold(True)
         self._title_label.setFont(title_font)
@@ -296,9 +295,8 @@ class ChatWindow(QWidget):
         self._close_btn.setObjectName("close_btn")
         self._close_btn.setFixedSize(int(28 * self._scale), int(28 * self._scale))
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        # 字号随缩放调整（基准 16px），用 font 而非内联 stylesheet 以保留 QSS 伪类
-        from PySide6.QtGui import QFont
         close_font = QFont()
+        close_font.setFamilies(self._font_ui.split(","))
         close_font.setPointSize(max(10, int(16 * self._scale)))
         self._close_btn.setFont(close_font)
         self._close_btn.clicked.connect(self.hide)
@@ -306,7 +304,6 @@ class ChatWindow(QWidget):
 
         container_layout.addWidget(self._title_bar)
 
-        # 保存 container_layout 以便延迟构建消息区
         self._container_layout = container_layout
 
         # --- 消息滚动区（仅在开启消息显示时构建）---
@@ -325,6 +322,10 @@ class ChatWindow(QWidget):
         self._input = QLineEdit()
         self._input.setObjectName("input_field")
         self._input.setPlaceholderText("输入消息...")
+        input_font = QFont()
+        input_font.setFamilies(self._font_mono.split(","))
+        input_font.setPointSize(max(9, int(14 * self._scale)))
+        self._input.setFont(input_font)
         input_layout.addWidget(self._input, stretch=1)
 
         self._send_button = QPushButton("发送")
@@ -337,24 +338,10 @@ class ChatWindow(QWidget):
 
         main_layout.addWidget(container)
 
-        # --- 信号连接 ---
         self._input.returnPressed.connect(self._on_send)
         self._send_button.clicked.connect(self._on_send)
 
-        # --- 应用 QSS（字号、padding 按缩放因子调整）---
-        qss = self.QSS
-        s = self._scale
-        qss = qss.replace("font-size: 14px;", f"font-size: {max(9, int(14 * s))}px;")
-        qss = qss.replace("font-size: 16px;", f"font-size: {max(10, int(16 * s))}px;")
-        qss = qss.replace("font-size: 12px;", f"font-size: {max(8, int(12 * s))}px;")
-        qss = qss.replace("font-size: 11px;", f"font-size: {max(8, int(11 * s))}px;")
-        qss = qss.replace("padding: 8px 12px;", f"padding: {int(8 * s)}px {int(12 * s)}px;")
-        qss = qss.replace("border-radius: 12px;", f"border-radius: {int(12 * s)}px;")
-        qss = qss.replace("border-radius: 18px;", f"border-radius: {int(18 * s)}px;")
-        qss = qss.replace("border-radius: 16px;", f"border-radius: {int(16 * s)}px;")
-        qss = qss.replace("border-radius: 6px;", f"border-radius: {int(6 * s)}px;")
-        qss = qss.replace("border-radius: 8px;", f"border-radius: {int(8 * s)}px;")
-        self.setStyleSheet(qss)
+        self.setStyleSheet(self._build_qss())
 
     def _build_message_scroll(self, container_layout: QVBoxLayout) -> None:
         """构建消息滚动区并添加到 container_layout。"""
@@ -375,18 +362,15 @@ class ChatWindow(QWidget):
         self._message_layout.addStretch()
 
         self._message_scroll.setWidget(scroll_content)
-        # 插入到标题栏之后、输入栏之前
         container_layout.insertWidget(1, self._message_scroll, stretch=1)
 
     def _ensure_messages_built(self) -> None:
         """_show_messages=False 时收到 bot 消息触发延迟构建消息区，
-        并以动画过渡到完整高度。
-        """
+        并以动画过渡到完整高度。"""
         if self._messages_built:
             return
         self._messages_built = True
         self._build_message_scroll(self._container_layout)
-        # 动画过渡到 WIN_HEIGHT_FULL
         target_h = int(self.WIN_HEIGHT_FULL * self._scale)
         self._size_anim = QPropertyAnimation(self, b"size")
         self._size_anim.setDuration(220)
@@ -413,17 +397,10 @@ class ChatWindow(QWidget):
         """向消息历史追加一条消息气泡。
 
         当 show_chat_messages=False 时：
-        - user/system 消息忽略（无显示区）
-        - bot 消息触发延迟构建消息区，并以动画过渡到完整高度
+        - system 消息忽略（无显示区）
+        - 任意非 system 消息触发延迟构建消息区，并以动画过渡到完整高度
         当 show_chat_messages=True 时正常追加气泡。
-
-        Args:
-            role: "user" 右对齐蓝色气泡，"system" 居中灰色气泡，
-                  其他左对齐深灰气泡。label 从 config 读取。
-            text: 消息文本内容。
-            reply_to: 可选，被回复消息的 ID（用于显示"↩ 回复某条消息"标记）。
         """
-        # 未开启显示区时，任意非 system 消息触发延迟构建
         if not self._messages_built:
             if role == "system":
                 return
@@ -475,18 +452,9 @@ class ChatWindow(QWidget):
         reply_to: str = "",
         emoji_bytes: bytes = b"",
     ) -> QFrame:
-        """创建单条消息气泡 widget。
-
-        Args:
-            role: 消息角色，决定气泡颜色和对齐。
-            label: 发送者名称（系统消息为空）。
-            text: 消息文本内容。
-            reply_to: 可选，被回复消息 ID（用于显示"↩ 回复某条消息"标记）。
-            emoji_bytes: 可选，emoji 图片字节（GIF/PNG），渲染为图片标签。
-
-        Returns:
-            配置好样式的 QFrame 气泡。
-        """
+        """创建单条消息气泡 widget（MD3 风格，主题配色 + 等宽/Ubuntu 字体）。"""
+        t = self._theme
+        s = self._scale
         bubble = QFrame()
         layout = QVBoxLayout(bubble)
         layout.setContentsMargins(10, 6, 10, 6)
@@ -496,7 +464,8 @@ class ChatWindow(QWidget):
         if reply_to and role not in ("user", "system"):
             reply_label = QLabel(f"↩ 回复消息 {reply_to[:8]}")
             reply_label.setStyleSheet(
-                f"color: {self.C_PRIMARY}; font-size: 10px; background: transparent;"
+                f"color: {t.accent}; font-size: {max(8, int(10 * s))}px;"
+                f" background: transparent; font-family: {self._font_ui};"
             )
             layout.addWidget(reply_label)
 
@@ -506,22 +475,30 @@ class ChatWindow(QWidget):
             msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
             msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             msg.setTextFormat(Qt.TextFormat.PlainText)
+            sys_font = QFont()
+            sys_font.setFamilies(self._font_ui.split(","))
+            sys_font.setPointSize(max(8, int(12 * s)))
+            msg.setFont(sys_font)
             msg.setStyleSheet(
-                f"color: {self.C_ON_SURFACE_VARIANT}; background: transparent;"
-                " font-size: 12px; font-style: italic;"
+                f"color: {t.bubble_system_fg}; background: transparent;"
+                f" font-style: italic;"
             )
             layout.addWidget(msg)
             bubble.setStyleSheet(
-                f"background-color: {self.C_SURFACE_CONTAINER_HIGHEST};"
-                " border-radius: 8px;"
+                f"background-color: {t.bubble_system_bg};"
+                f" border-radius: {int(8 * s)}px;"
             )
-            bubble.setFixedWidth(340)
+            bubble.setFixedWidth(int(340 * s))
         else:
             sender = QLabel(label)
+            sender_font = QFont()
+            sender_font.setFamilies(self._font_ui.split(","))
+            sender_font.setPointSize(max(8, int(11 * s)))
+            sender_font.setBold(True)
+            sender.setFont(sender_font)
             sender.setStyleSheet(
-                "font-size: 11px; font-weight: 600; background: transparent;"
+                "background: transparent;"
             )
-
             layout.addWidget(sender)
 
             # 文本（若有）
@@ -531,19 +508,21 @@ class ChatWindow(QWidget):
                 msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
                 msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 msg.setTextFormat(Qt.TextFormat.PlainText)
-                msg.setStyleSheet("font-size: 14px; background: transparent;")
+                txt_font = QFont()
+                txt_font.setFamilies(self._font_mono.split(","))
+                txt_font.setPointSize(max(9, int(14 * s)))
+                msg.setFont(txt_font)
+                msg.setStyleSheet("background: transparent;")
                 layout.addWidget(msg)
 
             # emoji 图片（若有）
             if emoji_bytes:
                 emoji_label = QLabel()
                 emoji_label.setStyleSheet("background: transparent;")
-                from PySide6.QtGui import QPixmap
                 pm = QPixmap()
                 pm.loadFromData(emoji_bytes)
                 if not pm.isNull():
-                    # 限制最大显示尺寸，等比缩放
-                    max_side = int(120 * self._scale)
+                    max_side = int(120 * s)
                     scaled = pm.scaled(
                         max_side, max_side,
                         Qt.AspectRatioMode.KeepAspectRatio,
@@ -554,33 +533,29 @@ class ChatWindow(QWidget):
 
             if role == "user":
                 bubble.setStyleSheet(
-                    f"background-color: {self.C_PRIMARY_CONTAINER};"
-                    " border-radius: 12px;"
+                    f"background-color: {t.bubble_user_bg};"
+                    f" border-radius: {int(12 * s)}px;"
                 )
                 sender.setStyleSheet(
-                    f"color: {self.C_PRIMARY}; font-size: 11px;"
-                    " font-weight: 600; background: transparent;"
+                    f"color: {t.primary}; background: transparent;"
                 )
                 if text:
                     msg.setStyleSheet(
-                        f"color: {self.C_ON_PRIMARY_CONTAINER}; font-size: 14px;"
-                        " background: transparent;"
+                        f"color: {t.bubble_user_fg}; background: transparent;"
                     )
             else:
                 bubble.setStyleSheet(
-                    f"background-color: {self.C_SURFACE_CONTAINER_HIGH};"
-                    " border-radius: 12px;"
+                    f"background-color: {t.bubble_bot_bg};"
+                    f" border-radius: {int(12 * s)}px;"
                 )
                 sender.setStyleSheet(
-                    f"color: {self.C_ON_SURFACE_VARIANT}; font-size: 11px;"
-                    " font-weight: 600; background: transparent;"
+                    f"color: {t.on_surface_variant}; background: transparent;"
                 )
                 if text:
                     msg.setStyleSheet(
-                        f"color: {self.C_ON_SURFACE}; font-size: 14px;"
-                        " background: transparent;"
+                        f"color: {t.bubble_bot_fg}; background: transparent;"
                     )
-            bubble.setFixedWidth(300)
+            bubble.setFixedWidth(int(300 * s))
 
         return bubble
 
@@ -618,8 +593,6 @@ class ChatWindow(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         """释放鼠标时清除拖拽状态并 emit 偏移变化。"""
         if self._drag_position is not None:
-            # 通知父组件（pet_window）计算相对偏移
-            # 此处 emit 一个相对全局原点的 QPoint，由 plugin 层减去 pet 全局坐标
             self.offset_changed.emit(self.pos())
             self._drag_position = None
         super().mouseReleaseEvent(event)
@@ -637,11 +610,17 @@ class ChatWindow(QWidget):
     def load_history(self, messages: list) -> None:
         """批量加载历史消息并渲染。
 
+        修复：show_chat_messages=False 时也触发延迟构建消息区，
+        使历史可见（原实现直接 return 导致历史丢失）。
+
         Args:
-            messages: 历史消息列表，每项为 dict {"role": "user"/"bot"/"system", "text": str}。
+            messages: 历史消息列表，每项为 dict {"role": ..., "text": ...}。
         """
-        if not self._show_messages or not messages:
+        if not messages:
             return
+        # 即使 _show_messages=False，只要有历史也展开消息区
+        if not self._messages_built:
+            self._ensure_messages_built()
         # 清空已有消息气泡（保留末尾的 stretch）
         while self._message_layout.count() > 1:
             item = self._message_layout.takeAt(0)
@@ -655,7 +634,6 @@ class ChatWindow(QWidget):
             if not text:
                 continue
             emoji_bytes = msg.get("emoji_bytes", b"") or b""
-            # 直接调 _create_bubble + insertWidget，跳过提示音和滚动延迟
             if role == "user":
                 label = (
                     getattr(self._config.chat, "user_name", "用户")
@@ -678,17 +656,26 @@ class ChatWindow(QWidget):
         QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _is_in_title_bar(self, widget: QWidget) -> bool:
-        """检查 widget 是否属于标题栏。
-
-        Args:
-            widget: 被点击的子控件。
-
-        Returns:
-            该控件是否在标题栏的 widget 树中。
-        """
+        """检查 widget 是否属于标题栏。"""
         current = widget
         while current is not None:
             if current is self._title_bar:
                 return True
             current = current.parentWidget()
         return False
+
+
+# 模块级辅助：把 #RRGGBB 转 "r, g, b" 用于 QSS rgba()
+def _hex_to_rgb_tuple(hex_color: str) -> str:
+    s = hex_color.strip().lstrip("#")
+    if len(s) == 3:
+        s = "".join(c * 2 for c in s)
+    if len(s) != 6:
+        return "0, 0, 0"
+    try:
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        return f"{r}, {g}, {b}"
+    except Exception:
+        return "0, 0, 0"

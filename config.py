@@ -127,6 +127,50 @@ class DesktopPetConfig(BaseConfig):
             tag="general",
         )
 
+    @config_section("theme", title="配色与字体", tag="general")
+    class ThemeSection(SectionBase):
+        """配色方案与字体配置"""
+        preset: str = Field(
+            default="mofox_blue",
+            description=(
+                "配色预设：mofox_blue（淡蓝#9EF6FF+纯白+深色背景，默认） / "
+                "mofox_blue_light（淡蓝浅色版） / ocean（海洋深蓝） / "
+                "forest（森林绿） / sunset（日落橙） / custom（自定义，用下方两项）"
+            ),
+            label="配色预设",
+            tag="general",
+        )
+        custom_primary: str = Field(
+            default="#9EF6FF",
+            description="自定义主色 #RRGGBB（仅 preset=custom 时生效）",
+            label="自定义主色",
+            tag="general",
+        )
+        custom_surface: str = Field(
+            default="#0F1416",
+            description="自定义背景色 #RRGGBB（仅 preset=custom 时生效）",
+            label="自定义背景色",
+            tag="general",
+        )
+        font_family_mono: str = Field(
+            default="",
+            description=(
+                "英文等宽编程字体族（默认 JetBrains Mono，GitHub 高 star 开源等宽字体，支持连字）。"
+                "留空使用默认链：JetBrains Mono → Cascadia Code → Fira Code → Consolas"
+            ),
+            label="英文等宽字体",
+            tag="general",
+        )
+        font_family_cjk: str = Field(
+            default="",
+            description=(
+                "中文字体族（默认 Ubuntu，即 Ubuntu 终端默认字体）。"
+                "留空使用默认链：Ubuntu → Microsoft YaHei → Noto Sans CJK SC"
+            ),
+            label="中文字体",
+            tag="general",
+        )
+
     @config_section("screen_watcher", title="屏幕监控", tag="ai")
     class ScreenWatcherSection(SectionBase):
         """屏幕监控配置"""
@@ -177,4 +221,5 @@ class DesktopPetConfig(BaseConfig):
     system_monitor: SystemMonitorSection = Field(default_factory=SystemMonitorSection)
     clipboard: ClipboardSection = Field(default_factory=ClipboardSection)
     chat: ChatSection = Field(default_factory=ChatSection)
+    theme: ThemeSection = Field(default_factory=ThemeSection)
     screen_watcher: ScreenWatcherSection = Field(default_factory=ScreenWatcherSection)

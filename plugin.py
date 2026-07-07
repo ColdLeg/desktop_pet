@@ -370,6 +370,27 @@ class DesktopPetAdapter(BaseAdapter):
                     logger.exception("Failed to set chat_position_mode")
             tray_manager.action_set_chat_position_mode.connect(_apply_chat_position_mode)
 
+            # 配色方案切换（运行时刷新主题，应用到所有 GUI 窗口）
+            def _apply_theme(preset: str) -> None:
+                try:
+                    cfg = self._config
+                    if not cfg or not getattr(cfg, "theme", None):
+                        return
+                    cfg.theme.preset = preset
+                    # 重新应用主题到各窗口
+                    pet_window.apply_theme(cfg)
+                    chat_window.apply_theme(cfg)
+                    # 持久化
+                    try:
+                        if hasattr(self._plugin, "save_config"):
+                            self._plugin.save_config()
+                    except Exception:
+                        pass
+                    logger.info(f"Theme switched to: {preset}")
+                except Exception:
+                    logger.exception("Failed to apply theme")
+            tray_manager.action_toggle_theme.connect(_apply_theme)
+
             # 连接聊天窗口打开信号（显示前先定位）
             def _show_chat_window() -> None:
                 # 若启用持久化偏移且偏移非零，按 pet_global + offset 定位
@@ -696,14 +717,16 @@ class DesktopPetAdapter(BaseAdapter):
     async def from_platform_message(self, raw: Any) -> MessageEnvelope | None:
         """将用户输入文本转换为 MessageEnvelope。
 
-        - source="screenshot" 走群聊路径（from_group），核心走完整 sub+actor 链路
-        - 其他走私聊路径（无 group_info），核心跳过 sub 直接进 actor
+        来源路由（通过 dict 的 source 字段区分，避免剪贴板被误判为截图）：
+        - source="screenshot": 截图走群聊路径（from_group），核心走完整 sub+actor 链路
+        - source="clipboard": 剪贴板变化走私聊路径，标记为系统主动触发
+        - 其他（用户直接输入）: 私聊路径，核心跳过 sub 直接进 actor
 
         支持 dict 格式消息字段：
         - text: 消息文本
         - nickname: 用户显示名称（可选）
         - is_proactive: 是否为系统主动触发（可选）
-        - source: "screenshot" 标识截图主动消息（可选）
+        - source: "screenshot"/"clipboard"/"system" 标识主动消息来源（可选）
         """
         text = ""
         nickname = getattr(self._config.chat, "user_name", "用户") if self._config else "用户"
@@ -756,6 +779,32 @@ class DesktopPetAdapter(BaseAdapter):
                 if not isinstance(meta, dict):
                     meta = dict(meta) if meta else {}
                 meta["source"] = "screenshot"
+                envelope["metadata"] = meta
+            except Exception:
+                pass
+            return envelope
+
+        if source == "clipboard":
+            # 剪贴板变化走私聊路径，标记为系统主动触发（区别于截图）
+            user_id = qq_id or "local_user"
+            nickname = "桌宠剪贴板监控"
+            envelope = (
+                MessageBuilder()
+                .direction("incoming")
+                .platform("desktop_pet")
+                .text(text)
+                .from_user(
+                    user_id=user_id,
+                    platform="desktop_pet",
+                    nickname=nickname,
+                )
+                .build()
+            )
+            try:
+                meta = envelope.get("metadata") or {}
+                if not isinstance(meta, dict):
+                    meta = dict(meta) if meta else {}
+                meta["source"] = "clipboard"
                 envelope["metadata"] = meta
             except Exception:
                 pass
@@ -857,6 +906,26 @@ class DesktopPetAdapter(BaseAdapter):
         else:
             logger.warning("StreamManager has no add_sent_message_to_history; skip write-back")
 
+    # ---- 主动消息投递（供 services 调用） ----
+
+    def enqueue_proactive_message(self, text: str, *, source: str = "clipboard") -> None:
+        """把服务产生的主动消息投递到 in_queue，走完整 sub+actor 链路。
+
+        与用户直接输入的消息区分：通过 source 字段标识来源
+       （clipboard / screenshot / system 等），from_platform_message 据此分流路由。
+
+        Args:
+            text: 消息文本。
+            source: 来源标识，默认 "clipboard"。
+        """
+        if not text or not text.strip():
+            return
+        self._in_queue.put({
+            "text": text,
+            "is_proactive": True,
+            "source": source,
+        })
+
     # ---- 服务生命周期 ----
 
     async def _start_services(self) -> None:
@@ -872,6 +941,8 @@ class DesktopPetAdapter(BaseAdapter):
         self._screen_watcher_service = ScreenWatcherService(self._plugin)
         # 注入 adapter 引用，用于截图请求和 in_queue 投递
         self._screen_watcher_service.bind_adapter(self)
+        # 注入 adapter 引用给剪贴板服务，用于主动消息投递（来源区分）
+        self._clipboard_service.bind_adapter(self)
 
         await self._day_night_service.start()
         await self._system_monitor_service.start()
@@ -903,7 +974,7 @@ class DesktopPetPlugin(BasePlugin):
 
     plugin_name = "desktop_pet"
     plugin_description = "具有对话、系统监控和剪贴板集成功能的桌面宠物"
-    plugin_version = "0.1.0"
+    plugin_version = "0.2.0"
     configs = [DesktopPetConfig]
 
     def get_components(self) -> list[type]:
