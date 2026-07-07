@@ -170,6 +170,14 @@ class DesktopPetConfig(BaseConfig):
             label="中文字体",
             tag="general",
         )
+        font_size_scale: float = Field(
+            default=1.0,
+            description="字号缩放因子（1.0=默认 12px；0.8=偏小；1.25=偏大；1.5=大）。可在托盘菜单热切换。",
+            label="字号缩放",
+            tag="general",
+            ge=0.5,
+            le=2.0,
+        )
 
     @config_section("screen_watcher", title="屏幕监控", tag="ai")
     class ScreenWatcherSection(SectionBase):

@@ -40,7 +40,7 @@ try:
 except ImportError:
     _HAS_QSOUND = False
 
-from .theme import get_font_family, get_theme, ColorTokens
+from .theme import get_font_family, get_font_size_scale, get_theme, ColorTokens
 
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
@@ -76,6 +76,8 @@ class ChatWindow(QWidget):
         self._theme: ColorTokens = get_theme(config)
         self._font_ui = get_font_family(config, kind="ui")
         self._font_mono = get_font_family(config, kind="mono")
+        # 字号缩放（用户可配置，热切换），与屏幕比例缩放因子 s 叠加
+        self._font_scale = get_font_size_scale(config)
 
         self._show_messages: bool = bool(
             getattr(config.chat, "show_chat_messages", False)
@@ -136,6 +138,7 @@ class ChatWindow(QWidget):
         """根据当前 theme token 生成 QSS（字号/padding 按缩放因子调整）。"""
         t = self._theme
         s = self._scale
+        fs = s * self._font_scale  # 字号专用缩放（屏幕比例 × 用户字号因子）
         ff_ui = self._font_ui
         ff_mono = self._font_mono
         # 用 {f} 占位，便于整体替换字体族
@@ -156,7 +159,7 @@ class ChatWindow(QWidget):
         }}
         #title_label {{
             color: {t.on_surface};
-            font-size: {max(8, int(12 * s))}px;
+            font-size: {max(8, int(12 * fs))}px;
             font-weight: 600;
             background: transparent;
         }}
@@ -164,7 +167,7 @@ class ChatWindow(QWidget):
             background: transparent;
             border: none;
             color: {t.outline};
-            font-size: {max(9, int(13 * s))}px;
+            font-size: {max(9, int(13 * fs))}px;
             border-radius: {int(6 * s)}px;
         }}
         #close_btn:hover {{
@@ -190,7 +193,7 @@ class ChatWindow(QWidget):
             border-radius: {int(12 * s)}px;
             color: {t.on_surface};
             padding: {int(8 * s)}px {int(12 * s)}px;
-            font-size: {max(8, int(12 * s))}px;
+            font-size: {max(8, int(12 * fs))}px;
             font-family: {ff_mono};
         }}
         #input_field:focus {{
@@ -201,7 +204,7 @@ class ChatWindow(QWidget):
             color: {t.on_primary};
             border: none;
             border-radius: {int(18 * s)}px;
-            font-size: {max(8, int(12 * s))}px;
+            font-size: {max(8, int(12 * fs))}px;
             font-weight: 600;
         }}
         #send_btn:hover {{
@@ -239,19 +242,20 @@ class ChatWindow(QWidget):
         self._theme = get_theme(config)
         self._font_ui = get_font_family(config, kind="ui")
         self._font_mono = get_font_family(config, kind="mono")
+        self._font_scale = get_font_size_scale(config)
         # 重应用 QSS
         self.setStyleSheet(self._build_qss())
         # 标题字体
         if hasattr(self, "_title_label") and self._title_label:
             f = QFont()
             f.setFamilies(self._font_ui.split(","))
-            f.setPixelSize(max(8, int(12 * self._scale)))
+            f.setPixelSize(max(8, int(12 * self._scale * self._font_scale)))
             f.setBold(True)
             self._title_label.setFont(f)
         if hasattr(self, "_close_btn") and self._close_btn:
             f = QFont()
             f.setFamilies(self._font_ui.split(","))
-            f.setPixelSize(max(9, int(13 * self._scale)))
+            f.setPixelSize(max(9, int(13 * self._scale * self._font_scale)))
             self._close_btn.setFont(f)
         self.update()
 
@@ -285,7 +289,7 @@ class ChatWindow(QWidget):
         self._title_label.setObjectName("title_label")
         title_font = QFont()
         title_font.setFamilies(self._font_ui.split(","))
-        title_font.setPixelSize(max(8, int(12 * self._scale)))
+        title_font.setPixelSize(max(8, int(12 * self._scale * self._font_scale)))
         title_font.setBold(True)
         self._title_label.setFont(title_font)
         title_layout.addWidget(self._title_label)
@@ -297,7 +301,7 @@ class ChatWindow(QWidget):
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_font = QFont()
         close_font.setFamilies(self._font_ui.split(","))
-        close_font.setPixelSize(max(9, int(13 * self._scale)))
+        close_font.setPixelSize(max(9, int(13 * self._scale * self._font_scale)))
         self._close_btn.setFont(close_font)
         self._close_btn.clicked.connect(self.hide)
         title_layout.addWidget(self._close_btn)
@@ -324,7 +328,7 @@ class ChatWindow(QWidget):
         self._input.setPlaceholderText("输入消息...")
         input_font = QFont()
         input_font.setFamilies(self._font_mono.split(","))
-        input_font.setPixelSize(max(8, int(12 * self._scale)))
+        input_font.setPixelSize(max(8, int(12 * self._scale * self._font_scale)))
         self._input.setFont(input_font)
         input_layout.addWidget(self._input, stretch=1)
 
@@ -464,7 +468,7 @@ class ChatWindow(QWidget):
         if reply_to and role not in ("user", "system"):
             reply_label = QLabel(f"↩ 回复消息 {reply_to[:8]}")
             reply_label.setStyleSheet(
-                f"color: {t.accent}; font-size: {max(7, int(9 * s))}px;"
+                f"color: {t.accent}; font-size: {max(7, int(9 * s * self._font_scale))}px;"
                 f" background: transparent; font-family: {self._font_ui};"
             )
             layout.addWidget(reply_label)
@@ -477,7 +481,7 @@ class ChatWindow(QWidget):
             msg.setTextFormat(Qt.TextFormat.PlainText)
             sys_font = QFont()
             sys_font.setFamilies(self._font_ui.split(","))
-            sys_font.setPixelSize(max(8, int(11 * s)))
+            sys_font.setPixelSize(max(8, int(11 * s * self._font_scale)))
             msg.setFont(sys_font)
             msg.setStyleSheet(
                 f"color: {t.bubble_system_fg}; background: transparent;"
@@ -493,7 +497,7 @@ class ChatWindow(QWidget):
             sender = QLabel(label)
             sender_font = QFont()
             sender_font.setFamilies(self._font_ui.split(","))
-            sender_font.setPixelSize(max(7, int(10 * s)))
+            sender_font.setPixelSize(max(7, int(10 * s * self._font_scale)))
             sender_font.setBold(True)
             sender.setFont(sender_font)
             sender.setStyleSheet(
@@ -510,7 +514,7 @@ class ChatWindow(QWidget):
                 msg.setTextFormat(Qt.TextFormat.PlainText)
                 txt_font = QFont()
                 txt_font.setFamilies(self._font_mono.split(","))
-                txt_font.setPixelSize(max(8, int(12 * s)))
+                txt_font.setPixelSize(max(8, int(12 * s * self._font_scale)))
                 msg.setFont(txt_font)
                 msg.setStyleSheet("background: transparent;")
                 layout.addWidget(msg)

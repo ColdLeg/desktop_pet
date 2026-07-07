@@ -391,6 +391,27 @@ class DesktopPetAdapter(BaseAdapter):
                     logger.exception("Failed to apply theme")
             tray_manager.action_toggle_theme.connect(_apply_theme)
 
+            # 字号大小切换（运行时热刷新所有窗口字号）
+            def _apply_font_scale(scale: float) -> None:
+                try:
+                    cfg = self._config
+                    if not cfg or not getattr(cfg, "theme", None):
+                        return
+                    cfg.theme.font_size_scale = float(scale)
+                    # 重新应用主题（含字号）到各窗口
+                    pet_window.apply_theme(cfg)
+                    chat_window.apply_theme(cfg)
+                    # 持久化
+                    try:
+                        if hasattr(self._plugin, "save_config"):
+                            self._plugin.save_config()
+                    except Exception:
+                        pass
+                    logger.info(f"Font scale set to: {scale}")
+                except Exception:
+                    logger.exception("Failed to apply font scale")
+            tray_manager.action_set_font_scale.connect(_apply_font_scale)
+
             # 连接聊天窗口打开信号（显示前先定位）
             def _show_chat_window() -> None:
                 # 若启用持久化偏移且偏移非零，按 pet_global + offset 定位

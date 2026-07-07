@@ -453,3 +453,24 @@ def get_font_family(config: "DesktopPetConfig | None", *, kind: str = "ui") -> s
         parts.append("monospace")
         return ", ".join(parts)
     return default
+
+
+def get_font_size_scale(config: "DesktopPetConfig | None") -> float:
+    """返回字号缩放因子（用户可配置，热切换）。
+
+    默认 1.0；范围 0.5~2.0。与屏幕比例缩放因子 s 叠加作用于最终字号。
+    """
+    if config is None:
+        return 1.0
+    try:
+        theme_cfg = getattr(config, "theme", None)
+    except Exception:
+        return 1.0
+    if theme_cfg is None:
+        return 1.0
+    val = getattr(theme_cfg, "font_size_scale", 1.0)
+    try:
+        v = float(val)
+    except Exception:
+        return 1.0
+    return max(0.5, min(2.0, v))

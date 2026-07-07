@@ -44,6 +44,7 @@ class TrayManager(QObject):
     action_chat = Signal()
     action_chat_hide = Signal()
     action_toggle_theme = Signal(str)
+    action_set_font_scale = Signal(float)
     action_quit = Signal()
     action_set_opacity = Signal(float)
     action_set_chat_position_mode = Signal(str)
@@ -152,6 +153,16 @@ class TrayManager(QObject):
         custom_act.triggered.connect(lambda checked=False: self.action_toggle_theme.emit("custom"))
         theme_menu.addAction(custom_act)
 
+        # 字号子菜单（热切换，用户自定义大小）
+        font_menu = menu.addMenu("字号大小")
+        current_scale = self._current_font_scale()
+        for pct, label in [(80, "小 (80%)"), (90, "较小 (90%)"), (100, "默认 (100%)"), (110, "较大 (110%)"), (125, "大 (125%)"), (150, "特大 (150%)")]:
+            act = QAction(label, font_menu)
+            act.setCheckable(True)
+            act.setChecked(abs(current_scale - pct / 100.0) < 0.01)
+            act.triggered.connect(lambda checked=False, p=pct: self.action_set_font_scale.emit(p / 100.0))
+            font_menu.addAction(act)
+
         menu.addSeparator()
 
         # 退出
@@ -181,6 +192,15 @@ class TrayManager(QObject):
         except Exception:
             pass
         return "mofox_blue"
+
+    def _current_font_scale(self) -> float:
+        """读取当前字号缩放因子。"""
+        try:
+            if self._config and getattr(self._config, "theme", None):
+                return float(getattr(self._config.theme, "font_size_scale", 1.0))
+        except Exception:
+            pass
+        return 1.0
 
     def _current_chat_position_mode(self) -> str:
         """读取当前聊天位置模式配置。"""

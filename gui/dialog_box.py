@@ -17,7 +17,7 @@ from PySide6.QtCore import QPropertyAnimation, QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from .theme import get_font_family, get_theme
+from .theme import get_font_family, get_font_size_scale, get_theme
 
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
@@ -54,6 +54,9 @@ class DialogBox(QWidget):
         # 主题
         self._theme = get_theme(config)
         self._font_family = get_font_family(config, kind="bubble")
+        # 字号缩放（用户可配置，热切换）
+        self._font_scale = get_font_size_scale(config)
+        self._font_size_px = max(8, int(self.FONT_SIZE * self._font_scale))
 
         # 自动隐藏时间
         if config:
@@ -90,7 +93,7 @@ class DialogBox(QWidget):
 
         font = QFont()
         font.setFamilies(self._font_family.split(","))
-        font.setPixelSize(self.FONT_SIZE)
+        font.setPixelSize(self._font_size_px)
         self._label.setFont(font)
 
         t = self._theme
@@ -117,10 +120,12 @@ class DialogBox(QWidget):
         self._config = config
         self._theme = get_theme(config)
         self._font_family = get_font_family(config, kind="bubble")
+        self._font_scale = get_font_size_scale(config)
+        self._font_size_px = max(8, int(self.FONT_SIZE * self._font_scale))
         t = self._theme
         font = QFont()
         font.setFamilies(self._font_family.split(","))
-        font.setPixelSize(self.FONT_SIZE)
+        font.setPixelSize(self._font_size_px)
         self._label.setFont(font)
         self._label.setStyleSheet(
             f"background-color: {t.dialog_bg};"
