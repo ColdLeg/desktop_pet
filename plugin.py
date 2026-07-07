@@ -717,16 +717,19 @@ class DesktopPetAdapter(BaseAdapter):
     async def from_platform_message(self, raw: Any) -> MessageEnvelope | None:
         """将用户输入文本转换为 MessageEnvelope。
 
-        来源路由（通过 dict 的 source 字段区分，避免剪贴板被误判为截图）：
+        来源路由（通过 dict 的 source 字段区分）：
         - source="screenshot": 截图走群聊路径（from_group），核心走完整 sub+actor 链路
-        - source="clipboard": 剪贴板变化走私聊路径，标记为系统主动触发
-        - 其他（用户直接输入）: 私聊路径，核心跳过 sub 直接进 actor
+        - 其他（用户直接输入 / is_proactive 系统提醒）: 私聊路径，核心跳过 sub 直接进 actor
+
+        注：剪贴板变化**不走消息流**，只通过 system reminder（被动上下文）注入。
+        当截图或用户消息触发 LLM 调用时，LLM 会读取到剪贴板 reminder 作为上下文，
+        但剪贴板自身不触发 LLM 调用，避免"每次复制都触发一次 LLM"。
 
         支持 dict 格式消息字段：
         - text: 消息文本
         - nickname: 用户显示名称（可选）
         - is_proactive: 是否为系统主动触发（可选）
-        - source: "screenshot"/"clipboard"/"system" 标识主动消息来源（可选）
+        - source: "screenshot" 标识截图主动消息（可选）
         """
         text = ""
         nickname = getattr(self._config.chat, "user_name", "用户") if self._config else "用户"
@@ -779,32 +782,6 @@ class DesktopPetAdapter(BaseAdapter):
                 if not isinstance(meta, dict):
                     meta = dict(meta) if meta else {}
                 meta["source"] = "screenshot"
-                envelope["metadata"] = meta
-            except Exception:
-                pass
-            return envelope
-
-        if source == "clipboard":
-            # 剪贴板变化走私聊路径，标记为系统主动触发（区别于截图）
-            user_id = qq_id or "local_user"
-            nickname = "桌宠剪贴板监控"
-            envelope = (
-                MessageBuilder()
-                .direction("incoming")
-                .platform("desktop_pet")
-                .text(text)
-                .from_user(
-                    user_id=user_id,
-                    platform="desktop_pet",
-                    nickname=nickname,
-                )
-                .build()
-            )
-            try:
-                meta = envelope.get("metadata") or {}
-                if not isinstance(meta, dict):
-                    meta = dict(meta) if meta else {}
-                meta["source"] = "clipboard"
                 envelope["metadata"] = meta
             except Exception:
                 pass
@@ -908,15 +885,15 @@ class DesktopPetAdapter(BaseAdapter):
 
     # ---- 主动消息投递（供 services 调用） ----
 
-    def enqueue_proactive_message(self, text: str, *, source: str = "clipboard") -> None:
+    def enqueue_proactive_message(self, text: str, *, source: str = "system") -> None:
         """把服务产生的主动消息投递到 in_queue，走完整 sub+actor 链路。
 
-        与用户直接输入的消息区分：通过 source 字段标识来源
-       （clipboard / screenshot / system 等），from_platform_message 据此分流路由。
+        仅用于真正的"主动触发源"（如截图定时循环），不用于剪贴板。
+        剪贴板变化只注入被动 system reminder，不调用此方法，避免每次复制都触发 LLM。
 
         Args:
             text: 消息文本。
-            source: 来源标识，默认 "clipboard"。
+            source: 来源标识，默认 "system"；截图用 "screenshot"。
         """
         if not text or not text.strip():
             return
@@ -941,7 +918,7 @@ class DesktopPetAdapter(BaseAdapter):
         self._screen_watcher_service = ScreenWatcherService(self._plugin)
         # 注入 adapter 引用，用于截图请求和 in_queue 投递
         self._screen_watcher_service.bind_adapter(self)
-        # 注入 adapter 引用给剪贴板服务，用于主动消息投递（来源区分）
+        # 注入 adapter 引用给剪贴板服务（兼容接口；剪贴板只注入被动 reminder，不主动投递消息）
         self._clipboard_service.bind_adapter(self)
 
         await self._day_night_service.start()

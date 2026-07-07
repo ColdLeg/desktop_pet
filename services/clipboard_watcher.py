@@ -1,11 +1,16 @@
 """桌面宠物的剪贴板监控服务。
 
-监视系统剪贴板的文本变化并记录新内容。
-变化时注入 desktop_pet_clipboard system reminder（明确标注来源为剪贴板），
-与截图（source="screenshot"）来源严格区分，避免消息路由混淆。
+监视系统剪贴板的文本变化，仅作为**被动上下文**注入 system reminder，
+不主动触发 LLM 调用。
 
-若注入 adapter，剪贴板变化还会作为 source="clipboard" 的主动消息投递到
-in_queue，走完整 sub+actor 链路；from_platform_message 据此分流。
+设计原则（被动上下文，非主动触发）：
+- 剪贴板变化 → 注入 desktop_pet_clipboard reminder（ONCE 消费）
+- 不投递主动消息到 in_queue，不触发 sub/actor 链路
+- 当真正的主动触发源（如截图定时循环、用户发消息）调用 LLM 时，
+  LLM 在那次调用中会读取到剪贴板 reminder 作为上下文
+- 这样避免"用户每复制一次就触发一次 LLM"的扰民与浪费
+
+与截图（source="screenshot"，定时主动触发）严格区分职责。
 """
 
 from __future__ import annotations
@@ -28,36 +33,31 @@ if TYPE_CHECKING:
 
 
 class ClipboardWatcherService(BaseService):
-    """剪贴板监控服务。
+    """剪贴板监控服务（被动上下文注入，不主动触发 LLM）。
 
-    定期检查系统剪贴板的文本内容，检测变化并记录日志。
-    变化时注入 system reminder（标注来源为剪贴板），可选投递主动消息。
+    定期检查系统剪贴板的文本内容，检测变化时注入 system reminder。
+    reminder 标注来源为剪贴板，供后续 LLM 调用读取，但自身不触发调用。
     """
 
     service_name = "clipboard_watcher"
-    service_description = "桌面宠物的剪贴板变化检测服务"
-    version = "0.2.0"
+    service_description = "桌面宠物的剪贴板变化检测服务（被动上下文）"
+    version = "0.2.1"
 
     def __init__(self, plugin: BasePlugin) -> None:
-        """初始化剪贴板监控服务。
-
-        Args:
-            plugin: 父插件实例。
-        """
+        """初始化剪贴板监控服务。"""
         super().__init__(plugin)
         self._config: DesktopPetConfig | None = None
         self._task: asyncio.Task | None = None
         self._last_text: str = ""
         self._log = get_logger("desktop_pet.clipboard")
-        # 由 adapter 注入：用于把剪贴板变化作为主动消息投递（可选）
+        # 保留 adapter 引用接口以兼容注入调用，但不再用于主动消息投递
         self._adapter: Any = None
 
     def bind_adapter(self, adapter: Any) -> None:
-        """注入 DesktopPetAdapter 实例（可选）。
+        """注入 DesktopPetAdapter 实例（兼容接口，当前不主动投递消息）。
 
-        注入后，剪贴板变化会同时作为 source="clipboard" 的主动消息
-        投递到 in_queue，走完整 sub+actor 链路，与截图（source="screenshot"）
-        在 from_platform_message 中严格区分路由。
+        剪贴板服务只注入被动 reminder，不调用 adapter 投递主动消息。
+        保留此方法仅为未来扩展（如需"读取剪贴板"工具调用时复用）。
         """
         self._adapter = adapter
 
@@ -72,7 +72,7 @@ class ClipboardWatcherService(BaseService):
         self._config = self._get_config()
         if self._config and self._config.clipboard.enabled:
             self._task = asyncio.create_task(self._watch_loop())
-            self._log.info("Clipboard watcher started")
+            self._log.info("Clipboard watcher started (passive context only)")
         else:
             self._log.info("Clipboard watcher disabled, skipping")
 
@@ -84,7 +84,7 @@ class ClipboardWatcherService(BaseService):
             self._log.info("Clipboard watcher stopped")
 
     async def _watch_loop(self) -> None:
-        """主剪贴板监控循环。"""
+        """主剪贴板监控循环（仅注入被动 reminder，不触发 LLM）。"""
         try:
             import pyperclip
         except ImportError:
@@ -113,7 +113,9 @@ class ClipboardWatcherService(BaseService):
                     display_text = current[:max_len] if len(current) > max_len else current
                     preview = display_text[:50].replace("\n", " ")
                     self._log.info(f"Clipboard changed: {preview}...")
-                    # 注入 system reminder（明确标注来源为剪贴板，非截图）
+                    # 仅注入被动 system reminder（ONCE 消费）
+                    # 不投递主动消息——剪贴板是"被读取"的上下文，不是"触发读取"的事件
+                    # 当截图定时循环或用户发消息触发 LLM 时，LLM 会读取到此 reminder
                     try:
                         store = get_system_reminder_store()
                         store.set(
@@ -125,18 +127,5 @@ class ClipboardWatcherService(BaseService):
                         )
                     except Exception:
                         self._log.error("Failed to inject clipboard reminder", exc_info=True)
-                    # 可选：作为主动消息投递（走 sub+actor 链路）
-                    # 仅当 adapter 已注入且内容非空时
-                    if self._adapter is not None and display_text.strip():
-                        try:
-                            self._adapter.enqueue_proactive_message(
-                                text=display_text,
-                                source="clipboard",
-                            )
-                        except Exception:
-                            self._log.error(
-                                "Failed to enqueue clipboard proactive message",
-                                exc_info=True,
-                            )
             except Exception:
                 self._log.error("Clipboard watch check failed", exc_info=True)
