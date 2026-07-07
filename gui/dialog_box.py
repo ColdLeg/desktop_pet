@@ -31,7 +31,8 @@ class DialogBox(QWidget):
     """
 
     # 硬编码默认值（config 无 theme 时回退）
-    FONT_SIZE = 14
+    # 统一用 px 单位（与 chat_window 一致），12px 紧凑清晰
+    FONT_SIZE = 12
     MAX_WIDTH = 280
     TYPING_SPEED_MS = 45
     AUTO_HIDE_SEC = 10.0
@@ -89,7 +90,7 @@ class DialogBox(QWidget):
 
         font = QFont()
         font.setFamilies(self._font_family.split(","))
-        font.setPointSize(self.FONT_SIZE)
+        font.setPixelSize(self.FONT_SIZE)
         self._label.setFont(font)
 
         t = self._theme
@@ -119,7 +120,7 @@ class DialogBox(QWidget):
         t = self._theme
         font = QFont()
         font.setFamilies(self._font_family.split(","))
-        font.setPointSize(self.FONT_SIZE)
+        font.setPixelSize(self.FONT_SIZE)
         self._label.setFont(font)
         self._label.setStyleSheet(
             f"background-color: {t.dialog_bg};"
