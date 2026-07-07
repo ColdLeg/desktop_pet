@@ -428,7 +428,7 @@ class DesktopPetAdapter(BaseAdapter):
             tray_manager.action_set_font_scale.connect(_apply_font_scale)
 
             # 连接聊天窗口打开信号（显示前先定位）
-            def _show_chat_window() -> None:
+            def _position_and_show_chat() -> None:
                 # 若启用持久化偏移且偏移非零，按 pet_global + offset 定位
                 cfg = self._config
                 if cfg and getattr(cfg.chat, "persist_chat_offset", False):
@@ -442,8 +442,17 @@ class DesktopPetAdapter(BaseAdapter):
                     pet_window.position_chat_window_default(chat_window)
                 chat_window.show()
 
-            tray_manager.action_chat.connect(_show_chat_window)
-            pet_window.chat_requested.connect(_show_chat_window)
+            # 双击 pet 切换 chat 开/关：可见则隐藏，不可见则定位并显示
+            def _toggle_chat_window() -> None:
+                if chat_window.isVisible():
+                    chat_window.hide()
+                else:
+                    _position_and_show_chat()
+
+            tray_manager.action_chat.connect(_position_and_show_chat)
+            pet_window.chat_toggled.connect(_toggle_chat_window)
+            # chat_requested 保留为「打开」语义，供旧调用方/未来扩展使用
+            pet_window.chat_requested.connect(_position_and_show_chat)
             tray_manager.action_chat_hide.connect(chat_window.hide)
 
             # 连接聊天窗口消息发送信号
@@ -538,6 +547,21 @@ class DesktopPetAdapter(BaseAdapter):
 
             # 标记 GUI 已就绪
             self._gui_ready.set()
+
+            # 退出前兜底保存：防抖 800ms 内快速关闭会丢失坐标，此处强制落盘
+            def _on_about_to_quit() -> None:
+                try:
+                    cfg_q = self._config
+                    if not cfg_q or not getattr(cfg_q, "pet", None):
+                        return
+                    pos = pet_window.pos()
+                    cfg_q.pet.position_x = int(pos.x())
+                    cfg_q.pet.position_y = int(pos.y())
+                    self._save_config()
+                except Exception:
+                    pass
+
+            app.aboutToQuit.connect(_on_about_to_quit)
 
             # 进入 Qt 事件循环
             exit_code = app.exec()

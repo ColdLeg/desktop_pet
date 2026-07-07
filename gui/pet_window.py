@@ -159,6 +159,7 @@ class PetWindow(QWidget):
     CLICK_THROUGH = False
 
     chat_requested = Signal()
+    chat_toggled = Signal()
     pet_moved = Signal()
     pet_moved_delta = Signal(QPoint)
 
@@ -567,9 +568,9 @@ class PetWindow(QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        """双击宠物窗口时请求打开聊天窗口。"""
+        """双击宠物窗口时切换聊天窗口开/关（已开则关、已关则开）。"""
         if event.button() == Qt.MouseButton.LeftButton:
-            self.chat_requested.emit()
+            self.chat_toggled.emit()
             event.accept()
         else:
             super().mouseDoubleClickEvent(event)

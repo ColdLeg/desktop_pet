@@ -75,11 +75,18 @@ class TrayManager(QObject):
         self._tray_icon = QSystemTrayIcon(icon, self)
         self._tray_icon.setToolTip(self.TOOLTIP)
 
+        # 菜单在每次即将显示时重建，确保切换配置后勾选状态实时刷新
+        # （透明度/字号/配色/位置模式等 setCheckable 项的 checked 状态）
         menu = QMenu()
-        self.build_menu(menu, with_quit_confirm=True)
-
         self._tray_icon.setContextMenu(menu)
+        menu.aboutToShow.connect(lambda: self._rebuild_context_menu(menu))
+
         self._tray_icon.activated.connect(self._on_tray_activated)
+
+    def _rebuild_context_menu(self, menu: QMenu) -> None:
+        """aboutToShow 时清空并重建菜单，使勾选状态反映最新配置。"""
+        menu.clear()
+        self.build_menu(menu, with_quit_confirm=True)
 
     def build_menu(self, menu: QMenu, *, with_quit_confirm: bool = True) -> None:
         """把共用菜单项填入指定 menu。
