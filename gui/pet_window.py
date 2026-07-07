@@ -527,6 +527,25 @@ class PetWindow(QWidget):
             x, y = new_pos.x(), new_pos.y()
         chat_window.move(x, y)
 
+    def follow_move_chat(self, chat_window: QWidget, delta: QPoint) -> None:
+        """follow 模式下拖动桌宠时移动聊天窗口。
+
+        先按 delta 平移 chat 保持相对位置；平移后若与桌宠几何重叠
+        （通常因屏幕钳制导致 chat 无法继续跟随），则回退到
+        position_chat_window_default 重新智能布局——使 chat 吸附到
+        靠近边框的一侧、pet 在内侧，从而保证 follow 模式下两者不重叠。
+        """
+        if delta.isNull():
+            return
+        # 先按 delta 平移（内部已做屏幕钳制）
+        self.move_chat_by_delta(chat_window, delta)
+        # 检测 pet 与 chat 是否重叠（用全局几何）
+        pet_rect = QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+        chat_rect = QRect(chat_window.pos(), chat_window.size())
+        if pet_rect.intersects(chat_rect):
+            # 重叠：回退全量智能布局，让 chat 重新吸附边框
+            self.position_chat_window_default(chat_window)
+
     def _take_screenshot(self) -> QPixmap | None:
         """截取桌宠中心所在屏的当前画面。"""
         screen = QGuiApplication.screenAt(self.geometry().center())

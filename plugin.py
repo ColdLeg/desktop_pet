@@ -389,6 +389,10 @@ class DesktopPetAdapter(BaseAdapter):
                         self._config.chat.chat_position_mode = mode
                         # 持久化位置模式
                         self._save_config()
+                        # 切换到 follow 且 chat 可见时，立即用智能布局把 chat 挪到 pet 旁
+                        # （chat 吸附靠近边框的一侧、pet 在内侧），建立初始相对位置
+                        if mode == "follow" and chat_window.isVisible():
+                            pet_window.position_chat_window_default(chat_window)
                 except Exception:
                     logger.exception("Failed to set chat_position_mode")
             tray_manager.action_set_chat_position_mode.connect(_apply_chat_position_mode)
@@ -500,8 +504,6 @@ class DesktopPetAdapter(BaseAdapter):
 
             # 拖动桌宠时重新定位聊天窗口（仅 follow 模式 + chat 可见）
             def _on_pet_moved_delta(delta) -> None:
-                from PySide6.QtGui import QGuiApplication as _QGui
-                from PySide6.QtCore import QPoint as _QPoint
                 cfg = self._config
                 if not cfg:
                     return
@@ -510,15 +512,9 @@ class DesktopPetAdapter(BaseAdapter):
                     return
                 if not chat_window.isVisible():
                     return
-                # 平滑跟随：按拖动 delta 平移 chat，避免重新智能布局导致的方向跳变。
-                # 仅当 chat 仍落在桌宠所在屏幕（未跨屏）时跟随；跨屏则回退全量定位。
-                pet_screen = _QGui.screenAt(pet_window.geometry().center())
-                chat_center = chat_window.pos() + _QPoint(chat_window.width() // 2, chat_window.height() // 2)
-                chat_screen = _QGui.screenAt(chat_center)
-                if pet_screen is not None and chat_screen is not None and pet_screen == chat_screen:
-                    pet_window.move_chat_by_delta(chat_window, delta)
-                else:
-                    pet_window.position_chat_window_default(chat_window)
+                # follow 模式：先按 delta 平移保持相对位置，若平移后与 pet 重叠
+                # （通常因屏幕钳制），则回退智能布局让 chat 重新吸附靠近边框的一侧。
+                pet_window.follow_move_chat(chat_window, delta)
 
             pet_window.pet_moved_delta.connect(_on_pet_moved_delta)
 
