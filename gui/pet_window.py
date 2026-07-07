@@ -528,23 +528,61 @@ class PetWindow(QWidget):
         chat_window.move(x, y)
 
     def follow_move_chat(self, chat_window: QWidget, delta: QPoint) -> None:
-        """follow 模式下拖动桌宠时移动聊天窗口。
+        """follow 模式下拖动桌宠时移动聊天窗口（方案1：拖动中实时调整）。
 
-        先按 delta 平移 chat 保持相对位置；平移后若与桌宠几何重叠
-        （通常因屏幕钳制导致 chat 无法继续跟随），则回退到
-        position_chat_window_default 重新智能布局——使 chat 吸附到
-        靠近边框的一侧、pet 在内侧，从而保证 follow 模式下两者不重叠。
+        目标布局：chat 贴靠近屏幕边框的一侧、pet 在 chat 内侧，两者不重叠。
+        步骤：
+        1. 按 delta 平移 chat 保持相对位置（带屏幕钳制）
+        2. 基于当前 pet 位置用 _compute_placement 重新算 chat 最佳位置
+           （_compute_placement 水平方向已对调：优先把 chat 放靠近边框侧）
+        3. 若 chat 与 pet 重叠（pet 占了边框位导致 chat 被钳制到 pet 同侧），
+           则把 pet 推到 chat 内侧（chat 贴边框、pet 在内），允许 pet 跳动
         """
-        if delta.isNull():
-            return
-        # 先按 delta 平移（内部已做屏幕钳制）
-        self.move_chat_by_delta(chat_window, delta)
-        # 检测 pet 与 chat 是否重叠（用全局几何）
+        if not delta.isNull():
+            # 先按 delta 平移保持相对位置（内部带屏幕钳制）
+            self.move_chat_by_delta(chat_window, delta)
+
+        # 基于当前 pet 位置重新智能布局 chat（chat 贴靠近边框侧）
+        chat_w = chat_window.width()
+        chat_h = chat_window.height()
+        placement, rect = self._compute_placement(chat_w, chat_h, prefer="auto", margin=10)
+        chat_window.move(rect.topLeft())
+
+        # 检测 pet 与 chat 是否重叠；重叠则把 pet 推到 chat 内侧
         pet_rect = QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
         chat_rect = QRect(chat_window.pos(), chat_window.size())
-        if pet_rect.intersects(chat_rect):
-            # 重叠：回退全量智能布局，让 chat 重新吸附边框
-            self.position_chat_window_default(chat_window)
+        if not pet_rect.intersects(chat_rect):
+            return  # 不重叠，布局已完成
+
+        # 计算把 pet 推到 chat 内侧的目标坐标
+        screen = self._resolve_screen()
+        avail = screen.availableGeometry() if screen else None
+        margin = 10
+        if placement.axis == "horizontal":
+            if placement.side == "left":
+                # chat 在 pet 左侧（贴左边框）→ pet 推到 chat 右侧
+                new_pet_x = chat_rect.right() + margin + 1
+            else:  # right
+                # chat 在 pet 右侧（贴右边框）→ pet 推到 chat 左侧
+                new_pet_x = chat_rect.left() - pet_rect.width() - margin - 1
+            new_pet_y = pet_rect.y()
+        else:  # vertical
+            if placement.side == "top":
+                # chat 在 pet 上方（贴上边框）→ pet 推到 chat 下方
+                new_pet_y = chat_rect.bottom() + margin + 1
+            else:  # bottom
+                # chat 在 pet 下方（贴下边框）→ pet 推到 chat 上方
+                new_pet_y = chat_rect.top() - pet_rect.height() - margin - 1
+            new_pet_x = pet_rect.x()
+
+        # pet 推动后钳制到屏幕可视区域
+        if avail is not None:
+            new_pet_x = max(avail.left(), min(new_pet_x, avail.right() - pet_rect.width()))
+            new_pet_y = max(avail.top(), min(new_pet_y, avail.bottom() - pet_rect.height()))
+
+        self.move(new_pet_x, new_pet_y)
+        # pet 移动后气泡也要跟随重定位
+        self._position_dialog()
 
     def _take_screenshot(self) -> QPixmap | None:
         """截取桌宠中心所在屏的当前画面。"""
