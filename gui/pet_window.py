@@ -76,43 +76,61 @@ class SvgPetLabel(QLabel):
         self._logical_size = self.size()
         super().resizeEvent(event)
 
+    def _render_target_rect(self) -> QRect:
+        """计算实际渲染内容在 widget 内的目标矩形（居中、保持纵横比）。
+
+        SVG 矢量与位图兜底共用此算法；paintEvent 据此绘制，rendered_rect
+        据此对外暴露，确保两者永不发散。
+        """
+        w = max(1, self.width())
+        h = max(1, self.height())
+        if self._svg_renderer is not None:
+            vb = self._svg_renderer.defaultSize()
+            vw = max(1, vb.width())
+            vh = max(1, vb.height())
+            scale = min(w / vw, h / vh)
+            dw = int(vw * scale)
+            dh = int(vh * scale)
+            return QRect((w - dw) // 2, (h - dh) // 2, dw, dh)
+        if self._fallback_pixmap is not None and not self._fallback_pixmap.isNull():
+            pm = self._fallback_pixmap
+            pw = max(1, pm.width())
+            ph = max(1, pm.height())
+            scale = min(w / pw, h / ph)
+            dw = int(pw * scale)
+            dh = int(ph * scale)
+            return QRect((w - dw) // 2, (h - dh) // 2, dw, dh)
+        return QRect(0, 0, w, h)
+
+    def rendered_rect(self) -> QRect:
+        """对外暴露的实际渲染矩形（widget 局部坐标）。
+
+        供 PetWindow._position_dialog 取 SVG/位图实际边界，使气泡紧贴角色
+        图像边缘而非整个 widget 边框（矢量图居中缩放后不填满窗口）。
+        """
+        return self._render_target_rect()
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """用 QSvgRenderer 渲染到 widget 物理像素。"""
         if self._svg_renderer is not None:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            w = max(1, self.width())
-            h = max(1, self.height())
-            viewBox = self._svg_renderer.defaultSize()
-            vw = max(1, viewBox.width())
-            vh = max(1, viewBox.height())
-            scale = min(w / vw, h / vh)
-            dw = int(vw * scale)
-            dh = int(vh * scale)
-            dx = (w - dw) // 2
-            dy = (h - dh) // 2
-            self._svg_renderer.render(painter, QRect(dx, dy, dw, dh))
+            self._svg_renderer.render(painter, self._render_target_rect())
             return
 
         if self._fallback_pixmap is not None and not self._fallback_pixmap.isNull():
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            w = max(1, self.width())
-            h = max(1, self.height())
+            r = self._render_target_rect()
             pm = self._fallback_pixmap.scaled(
-                w, h,
+                r.width(), r.height(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self._paint_pixmap_centered(painter, pm)
+            painter.drawPixmap(r.topLeft(), pm)
             return
 
         super().paintEvent(event)
-
-    def _paint_pixmap_centered(self, painter: QPainter, pm: QPixmap) -> None:
-        x = (self.width() - pm.width()) // 2
-        y = (self.height() - pm.height()) // 2
-        painter.drawPixmap(x, y, pm)
 
 
 # ----------------------------------------------------------------------------
@@ -306,15 +324,24 @@ class PetWindow(QWidget):
         *,
         prefer: str = "auto",
         margin: int = 10,
+        ref_rect: QRect | None = None,
     ) -> tuple[_Placement, QRect]:
         """计算目标窗口相对桌宠的最佳放置方位与目标矩形。
 
         策略（prefer="auto"）：
         - 同时评估上下/左右四个方向的可用空间
-        - 若上下方向能容纳（垂直空间充足）且左右任一侧不足，优先上下（垂直布局）
-        - 若左右方向能容纳且上下不足，优先左右（水平布局）
-        - 两侧都能容纳时，选择空间更宽裕的轴
-        - 全部不足时，选剩余空间最大的一侧并钳制
+        - 一轴能容纳且另一轴不足 → 选能容纳的轴
+        - 两轴都能容纳 → 选空间更宽裕的轴（修复：原实现恒等式导致从不比较）
+        - 全部不足 → 选剩余空间最大的一侧并钳制
+
+        水平布局方向（审美）：chat（大窗口）贴屏幕边框、pet 在内侧，
+        即优先把 chat 放到「靠近边框（空间小）」一侧；若该侧空间不足以
+        容纳 chat 则回退到「空间大」一侧，避免重叠。
+        垂直布局方向：保持「空间大的一侧」，上下无对调需求。
+
+        Args:
+            ref_rect: 可选基准全局矩形。默认用桌宠 widget 全局几何；
+                传 pixmap 实际渲染矩形时，气泡会紧贴角色边缘而非 widget 边框。
 
         prefer 可强制 "horizontal" / "vertical"。
 
@@ -323,23 +350,29 @@ class PetWindow(QWidget):
         """
         screen = self._resolve_screen()
         pet_global = self.mapToGlobal(QPoint(0, 0))
-        pw = self.width()
-        ph = self.height()
+        if ref_rect is not None and not ref_rect.isNull():
+            ref_top_left = ref_rect.topLeft()
+            pw = ref_rect.width()
+            ph = ref_rect.height()
+        else:
+            ref_top_left = pet_global
+            pw = self.width()
+            ph = self.height()
 
         if screen is None:
             # 无屏幕信息：默认右侧
             p = _Placement("horizontal", "right")
-            x = pet_global.x() + pw + margin
-            y = pet_global.y() + (ph - target_h) // 2
+            x = ref_top_left.x() + pw + margin
+            y = ref_top_left.y() + (ph - target_h) // 2
             return p, QRect(x, y, target_w, target_h)
 
         avail = screen.availableGeometry()
 
         # 四方向可用空间
-        right_space = avail.right() - (pet_global.x() + pw)
-        left_space = (pet_global.x() - avail.left())
-        bottom_space = avail.bottom() - (pet_global.y() + ph)
-        top_space = (pet_global.y() - avail.top())
+        right_space = avail.right() - (ref_top_left.x() + pw)
+        left_space = ref_top_left.x() - avail.left()
+        bottom_space = avail.bottom() - (ref_top_left.y() + ph)
+        top_space = ref_top_left.y() - avail.top()
 
         # 水平方向能否容纳
         h_ok_right = right_space >= target_w + margin
@@ -360,24 +393,15 @@ class PetWindow(QWidget):
         axis: str
         side: str
 
-        if v_can and (not h_can or (prefer == "auto" and v_can and not h_can)):
-            # 优先垂直
-            axis = "vertical"
-            if v_ok_bottom and (not v_ok_top or bottom_space >= top_space):
-                side = "bottom"
-            elif v_ok_top:
-                side = "top"
-            else:
-                side = "bottom"
+        if h_can and v_can:
+            # 两轴都能容纳：选空间更宽裕的轴（修复恒等式缺陷）
+            h_best = max(right_space, left_space)
+            v_best = max(bottom_space, top_space)
+            axis = "horizontal" if h_best >= v_best else "vertical"
         elif h_can:
-            # 水平
             axis = "horizontal"
-            if h_ok_right and (not h_ok_left or right_space >= left_space):
-                side = "right"
-            elif h_ok_left:
-                side = "left"
-            else:
-                side = "right"
+        elif v_can:
+            axis = "vertical"
         else:
             # 都不足：选剩余空间最大的一侧，钳制
             spaces = [
@@ -390,21 +414,43 @@ class PetWindow(QWidget):
             side = spaces[0][0]
             axis = spaces[0][2]
 
+        # 选定轴上的具体侧
+        if axis == "vertical":
+            if v_ok_bottom and (not v_ok_top or bottom_space >= top_space):
+                side = "bottom"
+            elif v_ok_top:
+                side = "top"
+            else:
+                side = "bottom"
+        else:  # horizontal
+            # 审美对调：优先把 chat 放到靠近边框（空间小）的一侧，使大窗口贴边框、
+            # pet 被推到内侧。仅当该侧空间足以容纳 chat 时才对调，否则回退空间大的一侧。
+            smaller_side = "left" if left_space <= right_space else "right"
+            smaller_space = left_space if smaller_side == "left" else right_space
+            larger_side = "right" if smaller_side == "left" else "left"
+            larger_ok = h_ok_right if larger_side == "right" else h_ok_left
+            if smaller_space >= target_w + margin:
+                side = smaller_side
+            elif larger_ok:
+                side = larger_side
+            else:
+                side = smaller_side
+
         # 计算坐标
         if axis == "vertical":
             # 水平居中对齐桌宠
-            x = pet_global.x() + (pw - target_w) // 2
+            x = ref_top_left.x() + (pw - target_w) // 2
             if side == "bottom":
-                y = pet_global.y() + ph + margin
+                y = ref_top_left.y() + ph + margin
             else:  # top
-                y = pet_global.y() - target_h - margin
+                y = ref_top_left.y() - target_h - margin
         else:  # horizontal
             # 垂直居中对齐桌宠
-            y = pet_global.y() + (ph - target_h) // 2
+            y = ref_top_left.y() + (ph - target_h) // 2
             if side == "right":
-                x = pet_global.x() + pw + margin
+                x = ref_top_left.x() + pw + margin
             else:  # left
-                x = pet_global.x() - target_w - margin
+                x = ref_top_left.x() - target_w - margin
 
         # 钳制到屏幕可视区域
         x = max(avail.left(), min(x, avail.right() - target_w))
@@ -415,66 +461,26 @@ class PetWindow(QWidget):
     # ---- Dialog 气泡定位 ----
 
     def _position_dialog(self) -> None:
-        """将对话气泡定位到桌宠旁（智能上下/左右）。"""
+        """将对话气泡定位到桌宠角色旁（智能上下/左右）。
+
+        基准为 SVG/位图实际渲染区域（rendered_rect），使气泡紧贴角色边缘
+        而非整个 widget 边框。复用 _compute_placement，消除原重复算法。
+        """
         if not self._dialog_box or not self._pet_label:
             return
 
-        pixmap = self._pet_label.pixmap()
-        if pixmap and not pixmap.isNull():
-            pix_w = pixmap.width()
-            pix_h = pixmap.height()
-        else:
-            pix_w, pix_h = self._win_w, self._win_h
+        # 取角色实际渲染矩形（widget 局部）→ 转全局
+        local = self._pet_label.rendered_rect()
+        pix_global_top_left = self._pet_label.mapToGlobal(local.topLeft())
+        ref_rect = QRect(pix_global_top_left, local.size())
 
-        label_w = self._pet_label.width()
-        label_h = self._pet_label.height()
-        offset_x = max(0, (label_w - pix_w) // 2)
-        offset_y = max(0, (label_h - pix_h) // 2)
-
-        # dialog 相对 pixmap 边缘定位；用 dialog 当前尺寸
         dialog_w = max(1, self._dialog_box.width())
         dialog_h = max(1, self._dialog_box.height())
 
-        # 把桌宠当作 pixmap 区域来算放置
-        # 临时把 pet 中心对齐到 pixmap 中心计算
-        pix_global_top_left = self._pet_label.mapToGlobal(QPoint(offset_x, offset_y))
-        # 构造一个以 pixmap 为中心的虚拟 pet 矩形
-        # 复用 _compute_placement：把 self 的几何临时视作 pixmap 区域
-        # 这里直接用 pixmap 全局矩形作为基准
-        screen = self._resolve_screen()
-        if screen is None:
-            self._dialog_box.move(pix_global_top_left.x() + pix_w + 5,
-                                  pix_global_top_left.y())
-            return
-        avail = screen.availableGeometry()
-
-        right_space = avail.right() - (pix_global_top_left.x() + pix_w)
-        left_space = pix_global_top_left.x() - avail.left()
-        bottom_space = avail.bottom() - (pix_global_top_left.y() + pix_h)
-        top_space = pix_global_top_left.y() - avail.top()
-
-        h_can = right_space >= dialog_w + 10 or left_space >= dialog_w + 10
-        v_can = bottom_space >= dialog_h + 10 or top_space >= dialog_h + 10
-
-        margin = 6
-        if v_can and (not h_can or bottom_space >= right_space):
-            # 垂直优先（上下空间充足或左右不足）
-            x = pix_global_top_left.x() + (pix_w - dialog_w) // 2
-            if bottom_space >= top_space and bottom_space >= dialog_h + margin:
-                y = pix_global_top_left.y() + pix_h + margin
-            else:
-                y = pix_global_top_left.y() - dialog_h - margin
-        else:
-            # 水平
-            y = pix_global_top_left.y() + (pix_h - dialog_h) // 2
-            if right_space >= left_space and right_space >= dialog_w + margin:
-                x = pix_global_top_left.x() + pix_w + margin
-            else:
-                x = pix_global_top_left.x() - dialog_w - margin
-
-        x = max(avail.left(), min(x, avail.right() - dialog_w))
-        y = max(avail.top(), min(y, avail.bottom() - dialog_h))
-        self._dialog_box.move(QPoint(x, y))
+        _placement, rect = self._compute_placement(
+            dialog_w, dialog_h, prefer="auto", margin=6, ref_rect=ref_rect
+        )
+        self._dialog_box.move(rect.topLeft())
 
     # ---- 公开 API ----
 
