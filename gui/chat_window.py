@@ -56,6 +56,7 @@ class ChatWindow(QWidget):
     message_sent = Signal(str)
     offset_changed = Signal(QPoint)
     visibility_changed = Signal(bool)
+    clear_context_requested = Signal()
 
     WIN_TITLE = "MoFox 桌宠"
     WIN_WIDTH = 380
@@ -141,6 +142,15 @@ class ChatWindow(QWidget):
         fs = s * self._font_scale  # 字号专用缩放（屏幕比例 × 用户字号因子）
         ff_ui = self._font_ui
         ff_mono = self._font_mono
+        # 渐变/双色强调：新预设有值时启用，旧预设回退纯色
+        if t.gradient_from and t.gradient_to:
+            title_bg = f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {t.gradient_from}, stop:1 {t.gradient_to})"
+            send_btn_bg = f"qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {t.gradient_from}, stop:1 {t.gradient_to})"
+        else:
+            title_bg = f"rgba({_hex_to_rgb_tuple(t.surface_container_low)}, 0.8)"
+            send_btn_bg = t.primary
+        focus_border = t.accent_secondary if t.accent_secondary else t.primary
+        scrollbar_hover = t.accent_secondary if t.accent_secondary else t.outline
         # 用 {f} 占位，便于整体替换字体族
         qss = f"""
         * {{
@@ -152,7 +162,7 @@ class ChatWindow(QWidget):
             border: 1px solid {t.surface_container_highest};
         }}
         #title_bar {{
-            background-color: rgba({_hex_to_rgb_tuple(t.surface_container_low)}, 0.8);
+            background-color: {title_bg};
             border-top-left-radius: {int(16 * s)}px;
             border-top-right-radius: {int(16 * s)}px;
             border-bottom: 1px solid {t.surface_container_highest};
@@ -173,6 +183,17 @@ class ChatWindow(QWidget):
         #close_btn:hover {{
             background-color: {t.outline_variant};
             color: {t.error};
+        }}
+        #clear_btn {{
+            background: transparent;
+            border: none;
+            color: {t.outline};
+            font-size: {max(9, int(13 * fs))}px;
+            border-radius: {int(6 * s)}px;
+        }}
+        #clear_btn:hover {{
+            background-color: {t.outline_variant};
+            color: {t.on_surface};
         }}
         #message_scroll {{
             background: transparent;
@@ -213,10 +234,10 @@ class ChatWindow(QWidget):
             font-family: {ff_mono};
         }}
         #input_field:focus {{
-            border: 1px solid {t.primary};
+            border: 1px solid {focus_border};
         }}
         #send_btn {{
-            background-color: {t.primary};
+            background-color: {send_btn_bg};
             color: {t.on_primary};
             border: none;
             border-radius: {int(18 * s)}px;
@@ -241,7 +262,7 @@ class ChatWindow(QWidget):
             min-height: 30px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background: {t.outline};
+            background: {scrollbar_hover};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0;
@@ -273,6 +294,11 @@ class ChatWindow(QWidget):
             f.setFamilies(self._font_ui.split(","))
             f.setPixelSize(max(9, int(13 * self._scale * self._font_scale)))
             self._close_btn.setFont(f)
+        if hasattr(self, "_clear_btn") and self._clear_btn:
+            f = QFont()
+            f.setFamilies(self._font_ui.split(","))
+            f.setPixelSize(max(9, int(13 * self._scale * self._font_scale)))
+            self._clear_btn.setFont(f)
         self.update()
 
     # ---- 构建 UI ----
@@ -310,6 +336,17 @@ class ChatWindow(QWidget):
         self._title_label.setFont(title_font)
         title_layout.addWidget(self._title_label)
         title_layout.addStretch()
+
+        self._clear_btn = QPushButton("清屏")
+        self._clear_btn.setObjectName("clear_btn")
+        self._clear_btn.setFixedSize(int(28 * self._scale), int(28 * self._scale))
+        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_font = QFont()
+        clear_font.setFamilies(self._font_ui.split(","))
+        clear_font.setPixelSize(max(9, int(13 * self._scale * self._font_scale)))
+        self._clear_btn.setFont(clear_font)
+        self._clear_btn.clicked.connect(self._on_clear)
+        title_layout.addWidget(self._clear_btn)
 
         self._close_btn = QPushButton("✕")
         self._close_btn.setObjectName("close_btn")
@@ -406,6 +443,22 @@ class ChatWindow(QWidget):
         if text:
             self.message_sent.emit(text)
             self._input.clear()
+
+    def _on_clear(self) -> None:
+        """处理清屏动作：清空消息气泡并发射清上下文信号。"""
+        self.clear_messages()
+        self.clear_context_requested.emit()
+
+    def clear_messages(self) -> None:
+        """清空消息区所有气泡，保留末尾 stretch。"""
+        if not self._messages_built or not hasattr(self, "_message_layout"):
+            return
+        # 逆序遍历移除所有 widget（保留末尾 stretch item）
+        while self._message_layout.count() > 1:
+            item = self._message_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
 
     def append_message(
         self,

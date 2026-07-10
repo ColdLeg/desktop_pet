@@ -98,12 +98,13 @@ class DialogBox(QWidget):
 
         t = self._theme
         # MD3 风格：圆角 16px，surface 容器色，文字 on_surface
+        dialog_border = t.accent_secondary if t.accent_secondary else t.outline_variant
         self._label.setStyleSheet(
             f"background-color: {t.dialog_bg};"
             f"color: {t.dialog_fg};"
             "padding: 10px 14px;"
             "border-radius: 16px;"
-            f"border: 1px solid {t.outline_variant};"
+            f"border: 1px solid {dialog_border};"
         )
 
         layout = QVBoxLayout(self)
@@ -127,12 +128,13 @@ class DialogBox(QWidget):
         font.setFamilies(self._font_family.split(","))
         font.setPixelSize(self._font_size_px)
         self._label.setFont(font)
+        dialog_border = t.accent_secondary if t.accent_secondary else t.outline_variant
         self._label.setStyleSheet(
             f"background-color: {t.dialog_bg};"
             f"color: {t.dialog_fg};"
             "padding: 10px 14px;"
             "border-radius: 16px;"
-            f"border: 1px solid {t.outline_variant};"
+            f"border: 1px solid {dialog_border};"
         )
         self.update()
 

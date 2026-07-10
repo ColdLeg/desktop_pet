@@ -137,7 +137,11 @@ class DesktopPetConfig(BaseConfig):
             description=(
                 "配色预设：mofox_blue（淡蓝#9EF6FF+纯白+深色背景，默认） / "
                 "mofox_blue_light（淡蓝浅色版） / ocean（海洋深蓝） / "
-                "forest（森林绿） / sunset（日落橙） / custom（自定义，用下方两项）"
+                "forest（森林绿） / sunset（日落橙） / "
+                "aurora（星空极光） / cyber_neon（赛博霓虹） / "
+                "amethyst（紫晶幻境） / amber（琥珀暮光） / "
+                "emerald（翡翠琉璃） / rose_dawn（玫瑰晨曦-浅色） / "
+                "custom（自定义，用下方两项）"
             ),
             label="配色预设",
             tag="general",
@@ -237,6 +241,21 @@ class DesktopPetConfig(BaseConfig):
             tag="ai",
         )
 
+    @config_section("tts", title="TTS 语音", tag="ai")
+    class TTSSection(SectionBase):
+        """TTS 语音合成配置"""
+        enabled: bool = Field(default=True, description="启用 TTS 语音合成（需要 TTS HTTP Server 运行中）", label="启用 TTS", tag="ai")
+        endpoint: str = Field(
+            default="http://127.0.0.1:8000/router/tts_http_server/api/tts/v1/synthesize",
+            description="TTS HTTP 合成接口地址",
+            label="TTS 端点",
+            tag="ai",
+        )
+        timeout: float = Field(default=30.0, description="TTS HTTP 请求超时时间（秒）", label="超时时间", tag="timer", ge=1.0, le=120.0)
+        mime_type: str = Field(default="audio/wav", description="TTS 音频 MIME 类型", label="音频格式", tag="ai")
+        provider: str = Field(default="", description="TTS provider 名称（留空使用服务端默认 provider）", label="TTS Provider", tag="ai")
+        volume: float = Field(default=0.8, description="TTS 语音播放音量（0.0~1.0）", label="音量", tag="general", ge=0.0, le=1.0, input_type="slider", step=0.05)
+
     plugin: PluginSection = Field(default_factory=PluginSection)
     pet: PetSection = Field(default_factory=PetSection)
     sleep: SleepSection = Field(default_factory=SleepSection)
@@ -245,3 +264,4 @@ class DesktopPetConfig(BaseConfig):
     chat: ChatSection = Field(default_factory=ChatSection)
     theme: ThemeSection = Field(default_factory=ThemeSection)
     screen_watcher: ScreenWatcherSection = Field(default_factory=ScreenWatcherSection)
+    tts: TTSSection = Field(default_factory=TTSSection)

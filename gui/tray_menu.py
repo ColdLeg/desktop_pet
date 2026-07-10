@@ -189,6 +189,12 @@ class TrayManager(QObject):
             "ocean": "海洋深蓝",
             "forest": "森林绿",
             "sunset": "日落橙",
+            "aurora": "星空极光",
+            "cyber_neon": "赛博霓虹",
+            "amethyst": "紫晶幻境",
+            "amber": "琥珀暮光",
+            "emerald": "翡翠琉璃",
+            "rose_dawn": "玫瑰晨曦",
         }.get(name, name)
 
     def _current_theme_preset(self) -> str:
