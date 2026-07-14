@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -40,10 +41,326 @@ try:
 except ImportError:
     _HAS_QSOUND = False
 
+try:
+    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PySide6.QtCore import QUrl as _QUrl, QBuffer as _QBuffer, QIODevice as _QIODevice
+    _HAS_MEDIA = True
+except ImportError:
+    _HAS_MEDIA = False
+
 from .theme import get_font_family, get_font_size_scale, get_theme, ColorTokens
 
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
+
+
+# ============================================================================
+# 语音气泡控件（QQ 风格）
+# ============================================================================
+
+class VoiceBubbleWidget(QFrame):
+    """QQ 风格语音消息气泡。
+
+    包含播放/暂停按钮、可拖动进度条、时长标签。
+    使用 QMediaPlayer + QAudioOutput 播放在内存中解码的音频数据。
+    """
+
+    def __init__(
+        self,
+        audio_bytes: bytes,
+        theme_tokens,
+        scale: float = 1.0,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._audio_bytes = audio_bytes
+        self._tokens = theme_tokens
+        self._scale = scale
+        self._playing = False
+        self._player: QMediaPlayer | None = None
+        self._audio_output: QAudioOutput | None = None
+        self._progress_timer: QTimer | None = None
+        self._duration_ms: int = 0
+        self._seeking: bool = False
+        self._temp_file: str = ""
+
+        self._build_ui()
+        self._init_player()
+
+    def _build_ui(self) -> None:
+        t = self._tokens
+        s = self._scale
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 10, 4)
+        layout.setSpacing(6)
+
+        # 播放/暂停按钮
+        self._play_btn = QPushButton("\u25b6")
+        self._play_btn.setObjectName("voice_play_btn")
+        self._play_btn.setFixedSize(int(30 * s), int(30 * s))
+        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._play_btn.setStyleSheet(
+            f"QPushButton {{"
+            f"  background-color: {t.primary}; color: {t.on_primary};"
+            f"  border: none; border-radius: {int(15 * s)}px;"
+            f"  font-size: {max(8, int(10 * s))}px;"
+            f"}}"
+            f"QPushButton:hover {{ background-color: {t.on_primary_container}; }}"
+        )
+        self._play_btn.clicked.connect(self._toggle_play)
+        layout.addWidget(self._play_btn)
+
+        # 进度条
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setObjectName("voice_slider")
+        self._slider.setRange(0, 1000)
+        self._slider.setValue(0)
+        self._slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{"
+            f"  background: {t.outline_variant}; height: {max(2, int(3 * s))}px;"
+            f"  border-radius: 2px;"
+            f"}}"
+            f"QSlider::handle:horizontal {{"
+            f"  background: {t.primary}; width: {max(6, int(10 * s))}px;"
+            f"  margin: {max(-3, int(-4 * s))}px 0;"
+            f"  border-radius: {max(3, int(5 * s))}px;"
+            f"}}"
+            f"QSlider::sub-page:horizontal {{"
+            f"  background: {t.primary}; border-radius: 2px;"
+            f"}}"
+        )
+        self._slider.sliderPressed.connect(self._on_slider_pressed)
+        self._slider.sliderReleased.connect(self._on_slider_released)
+        layout.addWidget(self._slider, stretch=1)
+
+        # 时长标签
+        self._time_label = QLabel("00:00")
+        self._time_label.setObjectName("voice_time")
+        self._time_label.setStyleSheet(
+            f"color: {t.on_surface_variant}; background: transparent;"
+            f" font-size: {max(7, int(9 * s))}px;"
+        )
+        layout.addWidget(self._time_label)
+
+        self.setFixedWidth(int(220 * s))
+        self.setStyleSheet(
+            f"background-color: {t.bubble_bot_bg};"
+            f" border-radius: {int(12 * s)}px;"
+        )
+
+    # ---- 音频格式检测与转码 ----
+
+    # 常见 AI 生成语音格式的 magic bytes 匹配
+    _AUDIO_MAGIC: dict[bytes, str] = {
+        b"#!SILK": "silk",       # SILK V3 (微信/QQ 语音)
+        b"#!AMR": "amr",         # AMR-NB/AMR-WB
+        b"RIFF": "wav",          # WAV
+        b"OggS": "ogg",          # OGG / OPUS
+        b"ID3": "mp3",           # MP3 (ID3 tag)
+        b"\xff\xfb": "mp3",      # MP3 (MPEG1 Layer3)
+        b"\xff\xf3": "mp3",      # MP3 (MPEG2 Layer3)
+        b"\xff\xf2": "mp3",      # MP3 (MPEG2.5 Layer3)
+        b"fLaC": "flac",         # FLAC
+        b"\x00\x00\x01\xba": "mpg",  # MPEG-PS
+        b"\x00\x00\x01\xb3": "mpg",  # MPEG-ES
+    }
+
+    @staticmethod
+    def _detect_audio_format(data: bytes) -> str:
+        """根据文件头 magic bytes 检测音频格式。"""
+        for magic, fmt in VoiceBubbleWidget._AUDIO_MAGIC.items():
+            if data.startswith(magic):
+                return fmt
+        return "bin"  # 未知格式
+
+    @staticmethod
+    def _find_ffmpeg() -> str | None:
+        """在系统 PATH 中查找 ffmpeg。"""
+        import shutil
+        return shutil.which("ffmpeg")
+
+    @staticmethod
+    def _convert_to_wav(input_path: str, output_path: str, fmt_hint: str = "bin") -> str | None:
+        """用 ffmpeg 将任意音频转为 16kHz mono WAV。"""
+        ffmpeg = VoiceBubbleWidget._find_ffmpeg()
+        if not ffmpeg:
+            return None
+        import subprocess
+        import os
+        # SILK/AMR 等非标准格式需指定输入格式或让 ffmpeg 自动探测
+        try:
+            # 先尝试自动探测（-f 不指定，ffmpeg 按扩展名/内容探测）
+            subprocess.run(
+                [ffmpeg, "-y", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", output_path],
+                capture_output=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
+                return output_path
+        except Exception:
+            pass
+        # 回退：尝试指定常见输入格式
+        try:
+            for try_fmt in (fmt_hint, "silk", "amr", "ogg", "mp3", "wav"):
+                if try_fmt == "bin":
+                    continue
+                subprocess.run(
+                    [ffmpeg, "-y", "-f", try_fmt, "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", output_path],
+                    capture_output=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                if os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
+                    return output_path
+        except Exception:
+            pass
+        return None
+
+    def _init_player(self) -> None:
+        """初始化音频播放器。
+
+        策略：
+        1. 检测音频格式（magic bytes）
+        2. 有 ffmpeg → 转为 16kHz mono WAV 再播放
+        3. 无 ffmpeg → 直接存为已知扩展名让 QMediaPlayer 尝试解码
+        4. 未知格式 / 解码失败 → 禁用播放按钮
+        """
+        if not _HAS_MEDIA or not self._audio_bytes:
+            self._play_btn.setEnabled(False)
+            return
+        try:
+            import tempfile
+            import os
+
+            fmt = self._detect_audio_format(self._audio_bytes)
+            suffix_map = {
+                "silk": ".silk", "amr": ".amr", "wav": ".wav",
+                "ogg": ".ogg", "mp3": ".mp3", "flac": ".flac",
+                "mpg": ".mpg", "bin": ".bin",
+            }
+            suffix = suffix_map.get(fmt, ".bin")
+
+            # 写入原始数据到临时文件
+            fd, raw_path = tempfile.mkstemp(suffix=suffix, prefix="mofox_voice_")
+            os.write(fd, self._audio_bytes)
+            os.close(fd)
+
+            play_path = raw_path
+
+            # 尝试用 ffmpeg 转为 WAV（Windows 上 QMediaPlayer 解码有限）
+            ffmpeg = self._find_ffmpeg()
+            if ffmpeg and fmt != "wav":
+                fd2, wav_path = tempfile.mkstemp(suffix=".wav", prefix="mofox_voice_conv_")
+                os.close(fd2)
+                converted = self._convert_to_wav(raw_path, wav_path, fmt_hint=fmt)
+                if converted:
+                    play_path = converted
+                    # 清理原始文件
+                    try:
+                        os.unlink(raw_path)
+                    except Exception:
+                        pass
+                    self._temp_file = wav_path
+                else:
+                    self._temp_file = raw_path
+            else:
+                self._temp_file = raw_path
+
+            self._player = QMediaPlayer(self)
+            self._audio_output = QAudioOutput(self)
+            self._audio_output.setVolume(1.0)
+            self._player.setAudioOutput(self._audio_output)
+            self._player.setSource(QUrl.fromLocalFile(play_path))
+
+            # 获取时长
+            self._player.durationChanged.connect(self._on_duration_changed)
+            self._player.playbackStateChanged.connect(self._on_state_changed)
+
+            # 监听错误（格式不支持等），回退显示
+            self._player.errorOccurred.connect(self._on_playback_error)
+
+            # 进度更新定时器
+            self._progress_timer = QTimer(self)
+            self._progress_timer.timeout.connect(self._update_slider)
+            self._progress_timer.start(200)
+        except Exception:
+            self._play_btn.setEnabled(False)
+
+    def _on_playback_error(self, error, error_string: str) -> None:
+        """QMediaPlayer 解码失败 → 禁用播放按钮并在标签显示错误。"""
+        self._play_btn.setEnabled(False)
+        self._time_label.setText("解码失败")
+        self._time_label.setStyleSheet(
+            f"color: {self._tokens.error}; background: transparent;"
+            f" font-size: {max(7, int(9 * self._scale))}px;"
+        )
+
+    def _on_duration_changed(self, duration_ms: int) -> None:
+        if duration_ms > 0:
+            self._duration_ms = duration_ms
+            self._time_label.setText(self._format_time(duration_ms))
+
+    def _on_state_changed(self, state) -> None:
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            self._playing = False
+            self._play_btn.setText("\u25b6")
+            self._slider.setValue(0)
+
+    def _toggle_play(self) -> None:
+        if not self._player:
+            return
+        if self._playing:
+            self._player.pause()
+            self._playing = False
+            self._play_btn.setText("\u25b6")
+        else:
+            self._player.play()
+            self._playing = True
+            self._play_btn.setText("\u23f8")
+
+    def _update_slider(self) -> None:
+        if self._seeking or not self._player or self._duration_ms <= 0:
+            return
+        pos = self._player.position()
+        val = int(pos / self._duration_ms * 1000) if self._duration_ms > 0 else 0
+        self._slider.setValue(min(val, 1000))
+        self._time_label.setText(self._format_time(pos))
+
+    def _on_slider_pressed(self) -> None:
+        self._seeking = True
+
+    def _on_slider_released(self) -> None:
+        self._seeking = False
+        if self._player and self._duration_ms > 0:
+            ratio = self._slider.value() / 1000.0
+            target_ms = int(self._duration_ms * ratio)
+            self._player.setPosition(target_ms)
+
+    @staticmethod
+    def _format_time(ms: int) -> str:
+        sec = max(0, ms // 1000)
+        m = sec // 60
+        s = sec % 60
+        return f"{m:02d}:{s:02d}"
+
+    def stop(self) -> None:
+        """停止播放并清理临时文件。"""
+        if self._player:
+            self._player.stop()
+        if self._progress_timer:
+            self._progress_timer.stop()
+        if self._temp_file:
+            try:
+                import os
+                os.unlink(self._temp_file)
+            except Exception:
+                pass
+            self._temp_file = ""
+
+    def closeEvent(self, event) -> None:
+        self.stop()
+        super().closeEvent(event)
 
 
 class ChatWindow(QWidget):
@@ -84,6 +401,7 @@ class ChatWindow(QWidget):
         ) if config else False
 
         self._messages_built: bool = self._show_messages
+        self._messages_collapsed: bool = False
         self._size_anim: QPropertyAnimation | None = None
 
         self.setWindowTitle(self.WIN_TITLE)
@@ -385,27 +703,67 @@ class ChatWindow(QWidget):
         container_layout.insertWidget(1, self._message_scroll, stretch=1)
 
     def _ensure_messages_built(self) -> None:
-        """_show_messages=False 时收到 bot 消息触发延迟构建消息区，
-        并以动画过渡到完整高度。"""
+        """确保消息区已构建。若已构建但处于折叠状态则展开。"""
         if self._messages_built:
+            if self._messages_collapsed:
+                self._expand_messages_area()
             return
         self._messages_built = True
         self._build_message_scroll(self._container_layout)
+        self._messages_collapsed = False
+
+    def _expand_messages_area(self) -> None:
+        """展开消息区（动画过渡到完整高度）。"""
+        if not self._messages_collapsed or not self._messages_built:
+            return
+        self._messages_collapsed = False
+        # 保持消息区显示完整
+        if hasattr(self, "_message_scroll") and self._message_scroll:
+            self._message_scroll.show()
         target_h = int(self.WIN_HEIGHT_FULL * self._scale)
+        self._animate_size(target_h)
+
+    def _collapse_messages_area(self) -> None:
+        """折叠消息区（动画收缩到仅输入框）。"""
+        if self._messages_collapsed or not self._messages_built:
+            return
+        self._messages_collapsed = True
+        if hasattr(self, "_message_scroll") and self._message_scroll:
+            self._message_scroll.hide()
+        base_h = int(self.WIN_HEIGHT * self._scale)
+        self._animate_size(base_h)
+
+    def _toggle_messages_area(self) -> None:
+        """双击标题栏：切换消息区折叠/展开。"""
+        if not self._messages_built:
+            return
+        if self._messages_collapsed:
+            self._expand_messages_area()
+        else:
+            self._collapse_messages_area()
+
+    def _animate_size(self, target_h: int) -> None:
+        """播放窗口高度动画到目标值。"""
+        if self._size_anim and self._size_anim.state() == QPropertyAnimation.State.Running:
+            self._size_anim.stop()
+        cur_h = self.height()
         self._size_anim = QPropertyAnimation(self, b"size")
         self._size_anim.setDuration(220)
         self._size_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._size_anim.setStartValue(QSize(self._win_w, self._win_h))
+        self._size_anim.setStartValue(QSize(self._win_w, cur_h))
         self._size_anim.setEndValue(QSize(self._win_w, target_h))
         self._size_anim.start()
         self._win_h = target_h
 
     def _on_send(self) -> None:
-        """处理发送动作：发射消息信号并清空输入框。"""
+        """处理发送动作：发射消息信号并清空输入框。
+        若消息区已构建且处于折叠状态则自动展开。"""
         text = self._input.text()
         if text:
             self.message_sent.emit(text)
             self._input.clear()
+            if self._messages_built and self._messages_collapsed:
+                self._expand_messages_area()
 
     def append_message(
         self,
@@ -413,6 +771,7 @@ class ChatWindow(QWidget):
         text: str,
         reply_to: str = "",
         emoji_bytes: bytes = b"",
+        voice_bytes: bytes = b"",
     ) -> None:
         """向消息历史追加一条消息气泡。
 
@@ -421,7 +780,7 @@ class ChatWindow(QWidget):
         - 任意非 system 消息触发延迟构建消息区，并以动画过渡到完整高度
         当 show_chat_messages=True 时正常追加气泡。
         """
-        if not self._messages_built:
+        if not self._messages_built or self._messages_collapsed:
             if role == "system":
                 return
             self._ensure_messages_built()
@@ -439,7 +798,7 @@ class ChatWindow(QWidget):
                 if self._config else "桌宠"
             )
 
-        bubble = self._create_bubble(role, label, text, reply_to=reply_to, emoji_bytes=emoji_bytes)
+        bubble = self._create_bubble(role, label, text, reply_to=reply_to, emoji_bytes=emoji_bytes, voice_bytes=voice_bytes)
 
         if role not in ("user", "system") and self._sound_effect:
             self._sound_effect.play()
@@ -471,6 +830,7 @@ class ChatWindow(QWidget):
         text: str,
         reply_to: str = "",
         emoji_bytes: bytes = b"",
+        voice_bytes: bytes = b"",
     ) -> QFrame:
         """创建单条消息气泡 widget（MD3 风格，主题配色 + 等宽/Ubuntu 字体）。"""
         t = self._theme
@@ -540,6 +900,16 @@ class ChatWindow(QWidget):
                     emoji_label.setPixmap(scaled)
                     layout.addWidget(emoji_label)
 
+            # 语音控件（仅在非 user 气泡中显示）
+            if voice_bytes and role != "user":
+                voice_widget = VoiceBubbleWidget(
+                    audio_bytes=voice_bytes,
+                    theme_tokens=t,
+                    scale=s,
+                    parent=bubble,
+                )
+                layout.addWidget(voice_widget)
+
             if role == "user":
                 bubble.setStyleSheet(
                     f"background-color: {t.bubble_user_bg};"
@@ -574,6 +944,15 @@ class ChatWindow(QWidget):
         scrollbar.setValue(scrollbar.maximum())
 
     # ---- 窗口拖拽 ----
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """双击标题栏切换消息区折叠/展开。"""
+        child = self.childAt(event.position().toPoint())
+        if child and self._is_in_title_bar(child):
+            self._toggle_messages_area()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:
         """点击标题栏区域时开始拖拽窗口。"""
@@ -628,7 +1007,7 @@ class ChatWindow(QWidget):
         if not messages:
             return
         # 即使 _show_messages=False，只要有历史也展开消息区
-        if not self._messages_built:
+        if not self._messages_built or self._messages_collapsed:
             self._ensure_messages_built()
         # 清空已有消息气泡（保留末尾的 stretch）
         while self._message_layout.count() > 1:
@@ -640,9 +1019,10 @@ class ChatWindow(QWidget):
             role = msg.get("role", "bot")
             text = msg.get("text", "")
             reply_to = msg.get("reply_to", "")
-            if not text:
-                continue
             emoji_bytes = msg.get("emoji_bytes", b"") or b""
+            voice_bytes = msg.get("voice_bytes", b"") or b""
+            if not text and not emoji_bytes and not voice_bytes:
+                continue
             if role == "user":
                 label = (
                     getattr(self._config.chat, "user_name", "用户")
@@ -655,7 +1035,7 @@ class ChatWindow(QWidget):
                     getattr(self._config.chat, "pet_name", "桌宠")
                     if self._config else "桌宠"
                 )
-            bubble = self._create_bubble(role, label, text, reply_to=reply_to, emoji_bytes=emoji_bytes)
+            bubble = self._create_bubble(role, label, text, reply_to=reply_to, emoji_bytes=emoji_bytes, voice_bytes=voice_bytes)
             if role == "user":
                 self._message_layout.insertWidget(self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignRight)
             elif role == "system":

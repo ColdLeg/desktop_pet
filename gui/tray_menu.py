@@ -98,10 +98,6 @@ class TrayManager(QObject):
         chat_action.triggered.connect(self.action_chat.emit)
         menu.addAction(chat_action)
 
-        hide_chat_action = QAction("隐藏聊天窗口", self)
-        hide_chat_action.triggered.connect(self.action_chat_hide.emit)
-        menu.addAction(hide_chat_action)
-
         menu.addSeparator()
 
         # 透明度子菜单

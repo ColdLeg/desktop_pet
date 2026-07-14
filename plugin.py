@@ -593,6 +593,7 @@ class DesktopPetAdapter(BaseAdapter):
                         msg.get("text", ""),
                         reply_to=reply_to,
                         emoji_bytes=msg.get("emoji_bytes", b"") or b"",
+                        voice_bytes=msg.get("voice_bytes", b"") or b"",
                     )
                 elif action == "load_chat_history":
                     chat_window.load_history(msg.get("messages", []))
@@ -674,22 +675,24 @@ class DesktopPetAdapter(BaseAdapter):
         role: str = "bot",
         reply_to: str = "",
         emoji_bytes: bytes = b"",
+        voice_bytes: bytes = b"",
     ) -> None:
         """根据 chat_window 可见性路由消息到正确窗口。
 
         chat 可见 → 进 chat 历史（若未开启显示区，由 chat_window 自动临时显示）
-        chat 不可见 → 进 pet 气泡（emoji 在 pet 上降级为占位文本）
+        chat 不可见 → 进 pet 气泡（emoji/voice 在 pet 上降级为占位文本）
 
         Args:
             text: 消息文本。
             role: "bot"/"system"/"error"。
             reply_to: 可选，被回复消息 ID（仅 chat_window 显示）。
             emoji_bytes: 可选，emoji 段的图片字节（GIF/PNG）。
+            voice_bytes: 可选，语音段的音频字节（WAV）。
         """
-        if not text and not emoji_bytes:
+        if not text and not emoji_bytes and not voice_bytes:
             return
         target = "chat" if self._chat_visible.is_set() else "pet"
-        logger.info(f"_route_out_message -> {target}, role={role}, text={text[:50]!r}, emoji={len(emoji_bytes)}B")
+        logger.info(f"_route_out_message -> {target}, role={role}, text={text[:50]!r}, emoji={len(emoji_bytes)}B, voice={len(voice_bytes)}B")
         if self._chat_visible.is_set():
             self._out_queue.put({
                 "action": "append_chat",
@@ -697,12 +700,16 @@ class DesktopPetAdapter(BaseAdapter):
                 "text": text,
                 "reply_to": reply_to,
                 "emoji_bytes": emoji_bytes,
+                "voice_bytes": voice_bytes,
             })
         else:
-            # pet 气泡不支持图片，emoji 降级为占位文本
+            # pet 气泡不支持图片/语音，降级为占位文本
             display = text
-            if emoji_bytes and not text:
-                display = "[表情包]"
+            if not display:
+                if voice_bytes:
+                    display = "[语音]"
+                elif emoji_bytes:
+                    display = "[表情包]"
             self._out_queue.put({"action": "show_dialog", "text": display})
         if role == "error":
             logger.exception(text)
@@ -718,6 +725,38 @@ class DesktopPetAdapter(BaseAdapter):
 
         Returns:
             图片字节；解码失败返回空 bytes。
+        """
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if not isinstance(data, str):
+            return b""
+        s = data.strip()
+        if s.startswith("data:"):
+            # data URL 格式
+            try:
+                _, b64 = s.split(",", 1)
+                import base64
+                return base64.b64decode(b64)
+            except Exception:
+                return b""
+        # 纯 base64
+        try:
+            import base64
+            return base64.b64decode(s)
+        except Exception:
+            return b""
+
+    @staticmethod
+    def _decode_voi_data(data: Any) -> bytes:
+        """把 message_segment 中 voice 段的 data 解码为音频字节。
+
+        支持的输入：
+        - data URL: "data:audio/wav;base64,XXXX"
+        - 纯 base64 字符串
+        - 已解码的 bytes
+
+        Returns:
+            音频字节；解码失败返回空 bytes。
         """
         if isinstance(data, (bytes, bytearray)):
             return bytes(data)
@@ -799,7 +838,11 @@ class DesktopPetAdapter(BaseAdapter):
 
         来源路由（通过 dict 的 source 字段区分）：
         - source="screenshot": 截图走群聊路径（from_group），核心走完整 sub+actor 链路
-        - 其他（用户直接输入 / is_proactive 系统提醒）: 私聊路径，核心跳过 sub 直接进 actor
+        - 其他（用户直接输入 / is_proactive 系统提醒）: 走用户私聊流，核心跳过 sub 直接进 actor
+
+        注：is_proactive 系统提醒与用户直接输入**共用同一个用户私聊流**（user_id 一致），
+        以保证主动消息与用户历史对话上下文连续；仅 nickname 标记为"系统提醒"以区分身份。
+        截图因走群聊流，与用户私聊流隔离，回复时由 _write_back_to_private_stream 回写私聊历史。
 
         注：剪贴板变化**不走消息流**，只通过 system reminder（被动上下文）注入。
         当截图或用户消息触发 LLM 调用时，LLM 会读取到剪贴板 reminder 作为上下文，
@@ -867,11 +910,12 @@ class DesktopPetAdapter(BaseAdapter):
                 pass
             return envelope
 
+        # 主动系统提醒与用户直接输入共用同一个用户私聊流（user_id 一致），
+        # 保证主动消息进入用户历史对话流，与已有上下文连续。
+        # 仅用 nickname 标记"系统提醒"身份，不改动 user_id 影响流归属。
+        user_id = qq_id or "local_user"
         if is_proactive:
-            user_id = "desktop_pet_system"
             nickname = "系统提醒"
-        else:
-            user_id = qq_id or "local_user"
 
         envelope = (
             MessageBuilder()
@@ -899,6 +943,7 @@ class DesktopPetAdapter(BaseAdapter):
         text = ""
         reply_to = ""
         emoji_bytes: bytes = b""
+        voice_bytes: bytes = b""
         if isinstance(seg, dict):
             t = seg.get("type")
             d = seg.get("data") or ""
@@ -908,6 +953,8 @@ class DesktopPetAdapter(BaseAdapter):
                 reply_to = str(d)
             elif t == "emoji":
                 emoji_bytes = self._decode_emoji_data(d)
+            elif t == "voice":
+                voice_bytes = self._decode_voi_data(d)
         elif isinstance(seg, list):
             for item in seg:
                 if not isinstance(item, dict):
@@ -920,8 +967,10 @@ class DesktopPetAdapter(BaseAdapter):
                     reply_to = str(d)
                 elif t == "emoji" and not emoji_bytes:
                     emoji_bytes = self._decode_emoji_data(d)
+                elif t == "voice" and not voice_bytes:
+                    voice_bytes = self._decode_voi_data(d)
 
-        if not text and not emoji_bytes:
+        if not text and not emoji_bytes and not voice_bytes:
             return
 
         # 检测消息来源是否为截图 stream
@@ -931,7 +980,7 @@ class DesktopPetAdapter(BaseAdapter):
             source = meta.get("source", "")
 
         # 路由到 chat_window 或 pet 气泡
-        self._route_out_message(text, role="bot", reply_to=reply_to, emoji_bytes=emoji_bytes)
+        self._route_out_message(text, role="bot", reply_to=reply_to, emoji_bytes=emoji_bytes, voice_bytes=voice_bytes)
 
         # 截图回复写回用户私聊 stream 历史
         if source == "screenshot" and text:
