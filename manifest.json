@@ -7,7 +7,7 @@
     "tags": ["desktop-pet", "gui", "companion", "pyside6", "material-design-3", "svg"],
     "author": "MoFox Team",
     "dependencies": {
-        "plugins": [],
+        "plugins": ["tts_http_server"],
         "components": []
     },
     "include": [

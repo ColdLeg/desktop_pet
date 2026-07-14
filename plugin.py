@@ -171,6 +171,11 @@ class DesktopPetAdapter(BaseAdapter):
         self._screen_watcher_service: Any = None
         self._services_started: bool = False
 
+        # --- TTS 播放器（GUI 线程创建，跨线程通过 out_queue 桥接） ---
+        self._tts_player = None
+        self._tts_audio_output = None
+        self._tts_buffer = None  # 保持 QBuffer 引用防止 GC
+
     # ---- 适配器生命周期 ----
 
     async def start(self) -> None:
@@ -230,6 +235,21 @@ class DesktopPetAdapter(BaseAdapter):
             except Exception:
                 logger.exception("Failed to inject user_qq system reminder")
 
+        # 注入 TTS 偏好 system reminder（仅在 TTS 启用时）
+        if self._config and getattr(self._config, "tts", None) and self._config.tts.enabled:
+            try:
+                store = get_system_reminder_store()
+                store.set(
+                    bucket=SystemReminderBucket.ACTOR,
+                    name="desktop_pet_tts_hint",
+                    content="当前对话平台为桌面宠物，支持语音播放。在适合的场景下，请优先使用语音消息（调用 TTS 相关 action）与用户交流，让对话更自然生动。",
+                    insert_type=SystemReminderInsertType.FIXED,
+                    consume=SystemReminderConsumeType.FOREVER,
+                )
+                logger.info("System reminder 'desktop_pet_tts_hint' injected")
+            except Exception:
+                logger.exception("Failed to inject TTS hint system reminder")
+
         # 调用父类启动（触发 on_adapter_loaded 钩子，启动健康检查）
         await super().start()
 
@@ -260,6 +280,13 @@ class DesktopPetAdapter(BaseAdapter):
         except Exception:
             logger.exception("Failed to cleanup user_qq system reminder")
 
+        # 清理 TTS 偏好 system reminder
+        try:
+            store = get_system_reminder_store()
+            store.delete(bucket=SystemReminderBucket.ACTOR, name="desktop_pet_tts_hint")
+        except Exception:
+            logger.exception("Failed to cleanup TTS hint system reminder")
+
         # 通知 GUI 线程退出
         self._out_queue.put({"action": "quit"})
 
@@ -267,6 +294,11 @@ class DesktopPetAdapter(BaseAdapter):
 
         if self._gui_thread and self._gui_thread.is_alive():
             self._gui_thread.join(timeout=5)
+
+        # 清理 TTS 播放器引用（GUI 线程已退出，Qt 对象已销毁）
+        self._tts_player = None
+        self._tts_audio_output = None
+        self._tts_buffer = None
 
         # 取消 in_queue 轮询任务
         if self._in_queue_task_info:
@@ -467,6 +499,13 @@ class DesktopPetAdapter(BaseAdapter):
 
             chat_window.message_sent.connect(_on_message_sent)
 
+            # 连接清屏信号 -> 异步清除 AI 对话上下文
+            chat_window.clear_context_requested.connect(
+                lambda: self._loop.call_soon_threadsafe(
+                    asyncio.create_task, self._handle_clear_context()
+                )
+            )
+
             # 聊天窗口可见性变化 -> 同步适配器 + 触发历史回读 + 加速 pet 输出
             def _on_visibility_changed(visible: bool) -> None:
                 if visible:
@@ -541,6 +580,20 @@ class DesktopPetAdapter(BaseAdapter):
             poll_timer.timeout.connect(lambda: self._poll_out_queue(pet_window, tray_manager, chat_window))
             poll_timer.start(100)  # 100 毫秒轮询间隔
 
+            # 初始化 TTS 播放器
+            if self._config and getattr(self._config, "tts", None) and self._config.tts.enabled:
+                try:
+                    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+                    self._tts_player = QMediaPlayer()
+                    self._tts_audio_output = QAudioOutput()
+                    self._tts_audio_output.setVolume(float(self._config.tts.volume))
+                    self._tts_player.setAudioOutput(self._tts_audio_output)
+                    logger.info("TTS player initialized")
+                except ImportError:
+                    logger.warning("PySide6.QtMultimedia not available, TTS playback disabled")
+                except Exception:
+                    logger.exception("Failed to initialize TTS player")
+
             # 标记 GUI 已就绪
             self._gui_ready.set()
 
@@ -599,8 +652,39 @@ class DesktopPetAdapter(BaseAdapter):
                     chat_window.load_history(msg.get("messages", []))
                 elif action == "take_screenshot":
                     self._handle_take_screenshot(pet_window, msg.get("seq", 0))
+                elif action == "play_tts":
+                    self._play_tts_audio(msg.get("audio_data", b""))
         except queue.Empty:
             pass
+
+    def _play_tts_audio(self, audio_data: bytes) -> None:
+        """在 GUI 线程中播放 TTS 音频字节（内存播放，无需临时文件）。
+
+        使用 QMediaPlayer + QBuffer 实现内存播放，避免写临时文件。
+        """
+        if not audio_data or self._tts_player is None:
+            return
+        try:
+            from PySide6.QtCore import QBuffer, QIODevice
+
+            # 停止当前播放
+            self._tts_player.stop()
+
+            # 创建内存 buffer 存放音频数据
+            buf = QBuffer()
+            buf.setData(audio_data)
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+
+            # 保持 buffer 引用防止提前 GC
+            self._tts_buffer = buf
+
+            # 设置播放源并播放
+            self._tts_player.setSourceDevice(buf)
+            self._tts_player.play()
+
+            logger.debug(f"TTS playback started: {len(audio_data)} bytes")
+        except Exception:
+            logger.exception("Failed to play TTS audio")
 
     def _handle_take_screenshot(self, pet_window, seq: int) -> None:
         """在 GUI 线程内执行截图，把 PNG 字节回传给等待的 Future。"""
@@ -747,11 +831,10 @@ class DesktopPetAdapter(BaseAdapter):
             return b""
 
     @staticmethod
-    def _decode_voi_data(data: Any) -> bytes:
+    def _decode_voice_data(data: Any) -> bytes:
         """把 message_segment 中 voice 段的 data 解码为音频字节。
 
         支持的输入：
-        - data URL: "data:audio/wav;base64,XXXX"
         - 纯 base64 字符串
         - 已解码的 bytes
 
@@ -762,19 +845,9 @@ class DesktopPetAdapter(BaseAdapter):
             return bytes(data)
         if not isinstance(data, str):
             return b""
-        s = data.strip()
-        if s.startswith("data:"):
-            # data URL 格式
-            try:
-                _, b64 = s.split(",", 1)
-                import base64
-                return base64.b64decode(b64)
-            except Exception:
-                return b""
-        # 纯 base64
         try:
             import base64
-            return base64.b64decode(s)
+            return base64.b64decode(data.strip())
         except Exception:
             return b""
 
@@ -813,7 +886,7 @@ class DesktopPetAdapter(BaseAdapter):
             for m in msgs:
                 # 字段名按主程序 Messages 表结构
                 role = "bot" if getattr(m, "sender_role", "") == "bot" else "user"
-                content = getattr(m, "content", "") or getattr(m, "text", "") or ""
+                content = getattr(m, "processed_plain_text", None) or getattr(m, "content", "") or getattr(m, "text", "") or ""
                 if isinstance(content, list):
                     # message_segment 列表
                     txt = ""
@@ -831,6 +904,23 @@ class DesktopPetAdapter(BaseAdapter):
         except Exception:
             logger.exception("Failed to fetch chat history")
 
+    async def _handle_clear_context(self) -> None:
+        """处理清屏请求：清除桌宠私聊流的 AI 对话上下文。"""
+        try:
+            from src.core.managers.stream_manager import get_stream_manager
+            from src.core.models.stream import ChatStream
+            cfg = self._config
+            if not cfg:
+                return
+            user_id = (cfg.chat.user_qq_id.strip() or "local_user")
+            platform = "desktop_pet"
+            stream_id = ChatStream.generate_stream_id(platform=platform, user_id=user_id)
+            sm = get_stream_manager()
+            await sm.clear_stream_context(stream_id)
+            logger.info(f"Stream context cleared for desktop_pet stream: {stream_id}")
+        except Exception:
+            logger.exception("Failed to clear stream context")
+
     # ---- 消息转换 ----
 
     async def from_platform_message(self, raw: Any) -> MessageEnvelope | None:
@@ -838,11 +928,7 @@ class DesktopPetAdapter(BaseAdapter):
 
         来源路由（通过 dict 的 source 字段区分）：
         - source="screenshot": 截图走群聊路径（from_group），核心走完整 sub+actor 链路
-        - 其他（用户直接输入 / is_proactive 系统提醒）: 走用户私聊流，核心跳过 sub 直接进 actor
-
-        注：is_proactive 系统提醒与用户直接输入**共用同一个用户私聊流**（user_id 一致），
-        以保证主动消息与用户历史对话上下文连续；仅 nickname 标记为"系统提醒"以区分身份。
-        截图因走群聊流，与用户私聊流隔离，回复时由 _write_back_to_private_stream 回写私聊历史。
+        - 其他（用户直接输入 / is_proactive 系统提醒）: 私聊路径，核心跳过 sub 直接进 actor
 
         注：剪贴板变化**不走消息流**，只通过 system reminder（被动上下文）注入。
         当截图或用户消息触发 LLM 调用时，LLM 会读取到剪贴板 reminder 作为上下文，
@@ -910,12 +996,14 @@ class DesktopPetAdapter(BaseAdapter):
                 pass
             return envelope
 
-        # 主动系统提醒与用户直接输入共用同一个用户私聊流（user_id 一致），
-        # 保证主动消息进入用户历史对话流，与已有上下文连续。
-        # 仅用 nickname 标记"系统提醒"身份，不改动 user_id 影响流归属。
-        user_id = qq_id or "local_user"
         if is_proactive:
+            # 主动系统提醒与用户直接输入共用同一个用户私聊流（user_id 一致），
+            # 保证主动消息进入用户历史对话流，与已有上下文连续。
+            # 仅用 nickname 标记"系统提醒"身份，不改动 user_id 影响流归属。
+            user_id = qq_id or "local_user"
             nickname = "系统提醒"
+        else:
+            user_id = qq_id or "local_user"
 
         envelope = (
             MessageBuilder()
@@ -938,7 +1026,17 @@ class DesktopPetAdapter(BaseAdapter):
         emoji 段携带 base64 编码的图片（GIF/PNG），转换为 QPixmap 渲染。
         若消息来自截图 stream（metadata.source="screenshot"），同步把回复写回用户私聊 stream 历史。
         """
-        logger.info(f"_send_platform_message called, chat_visible={self._chat_visible.is_set()}, envelope={envelope}")
+        # 精简日志：仅打印 segment type 列表和来源，避免 base64 音频/图片数据膨胀日志
+        _seg = envelope.get("message_segment")
+        if isinstance(_seg, dict):
+            _seg_types = [_seg.get("type", "?")]
+        elif isinstance(_seg, list):
+            _seg_types = [item.get("type", "?") for item in _seg if isinstance(item, dict)]
+        else:
+            _seg_types = []
+        _meta = envelope.get("metadata") or {}
+        _source = _meta.get("source", "") if isinstance(_meta, dict) else ""
+        logger.info(f"_send_platform_message called, chat_visible={self._chat_visible.is_set()}, seg_types={_seg_types}, source={_source!r}")
         seg = envelope.get("message_segment")
         text = ""
         reply_to = ""
@@ -954,7 +1052,7 @@ class DesktopPetAdapter(BaseAdapter):
             elif t == "emoji":
                 emoji_bytes = self._decode_emoji_data(d)
             elif t == "voice":
-                voice_bytes = self._decode_voi_data(d)
+                voice_bytes = self._decode_voice_data(d)
         elif isinstance(seg, list):
             for item in seg:
                 if not isinstance(item, dict):
@@ -968,7 +1066,7 @@ class DesktopPetAdapter(BaseAdapter):
                 elif t == "emoji" and not emoji_bytes:
                     emoji_bytes = self._decode_emoji_data(d)
                 elif t == "voice" and not voice_bytes:
-                    voice_bytes = self._decode_voi_data(d)
+                    voice_bytes = self._decode_voice_data(d)
 
         if not text and not emoji_bytes and not voice_bytes:
             return
@@ -979,8 +1077,17 @@ class DesktopPetAdapter(BaseAdapter):
         if isinstance(meta, dict):
             source = meta.get("source", "")
 
-        # 路由到 chat_window 或 pet 气泡
+        # 路由到 chat_window 或 pet 气泡（voice_bytes 同时传给 chat 显示语音气泡）
         self._route_out_message(text, role="bot", reply_to=reply_to, emoji_bytes=emoji_bytes, voice_bytes=voice_bytes)
+
+        # 播放 AI 生成的语音消息（来自 GenerateVoiceAction 等）
+        if voice_bytes and self._loop is not None:
+            self._out_queue.put({"action": "play_tts", "audio_data": voice_bytes})
+
+        # 异步触发 TTS 合成（非阻塞，不延迟消息显示）
+        # 如果已有 voice 音频（AI 已合成），跳过桌宠自己的 TTS 合成以避免双重音频
+        if text and not voice_bytes and self._config and getattr(self._config, "tts", None) and self._config.tts.enabled and self._loop is not None:
+            self._loop.create_task(self._synthesize_and_queue_tts(text))
 
         # 截图回复写回用户私聊 stream 历史
         if source == "screenshot" and text:
@@ -1004,13 +1111,36 @@ class DesktopPetAdapter(BaseAdapter):
         bot_id = bot_info.get("bot_id", "desktop_pet")
         # add_sent_message_to_history 具体签名以主程序为准；若不存在接口则跳过
         if hasattr(sm, "add_sent_message_to_history"):
-            sm.add_sent_message_to_history(
+            result = sm.add_sent_message_to_history(
                 stream_id=stream_id,
                 text=text,
                 bot_id=bot_id,
             )
+            if hasattr(result, "__await__"):
+                await result
         else:
             logger.warning("StreamManager has no add_sent_message_to_history; skip write-back")
+
+    # ---- TTS 语音合成 ----
+
+    async def _synthesize_and_queue_tts(self, text: str) -> None:
+        """异步合成 TTS 语音，结果放入 out_queue 由 GUI 线程播放。
+
+        Args:
+            text: 待合成的回复文本。
+        """
+        try:
+            from .tts import synthesize_tts
+
+            audio = await synthesize_tts(
+                text=text,
+                config=self._config.tts,
+                logger=logger,
+            )
+            if audio:
+                self._out_queue.put({"action": "play_tts", "audio_data": audio})
+        except Exception:
+            logger.exception("TTS synthesis failed")
 
     # ---- 主动消息投递（供 services 调用） ----
 

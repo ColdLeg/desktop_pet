@@ -92,6 +92,13 @@ class ColorTokens:
     # 标记色：回复引用、链接
     accent: str
 
+    # 双色强调：第二个强调色（用于 scrollbar hover、input focus border 等）
+    accent_secondary: str = ""
+
+    # 渐变色：标题栏/发送按钮的渐变起止色（空串=不使用渐变，回退纯色）
+    gradient_from: str = ""
+    gradient_to: str = ""
+
     @property
     def is_dark(self) -> bool:
         """推测是否为暗色主题（基于 surface 亮度）。"""
@@ -242,12 +249,206 @@ _PRESET_SUNSET: ColorTokens = ColorTokens(
     accent="#FFB59E",
 )
 
+# ---- 新增6套配色预设（参考 galaxy UI 风格） ----
+
+# 星空极光：宇宙渐变 + 极光绿
+_PRESET_AURORA: ColorTokens = ColorTokens(
+    primary="#6FE9A8",
+    on_primary="#003920",
+    primary_container="#1A3B2E",
+    on_primary_container="#8DF8C2",
+    surface="#0F0C29",
+    on_surface="#FFFFFF",
+    surface_container_low="#161331",
+    surface_container="#1B1838",
+    surface_container_high="#252244",
+    surface_container_highest="#302D52",
+    on_surface_variant="#C5C2D6",
+    outline="#8B88A6",
+    outline_variant="#3D3A55",
+    error="#FFB4AB",
+    on_error="#690005",
+    bubble_user_bg="#1A3B2E",
+    bubble_user_fg="#8DF8C2",
+    bubble_bot_bg="#252244",
+    bubble_bot_fg="#FFFFFF",
+    bubble_system_bg="#302D52",
+    bubble_system_fg="#C5C2D6",
+    dialog_bg="rgba(27, 24, 56, 0.96)",
+    dialog_fg="#FFFFFF",
+    accent="#6FE9A8",
+    accent_secondary="#7C3AED",
+    gradient_from="#302B63",
+    gradient_to="#0F0C29",
+)
+
+# 赛博霓虹：霓虹发光
+_PRESET_CYBER_NEON: ColorTokens = ColorTokens(
+    primary="#FF206E",
+    on_primary="#FFFFFF",
+    primary_container="#3D0D1E",
+    on_primary_container="#FF80A8",
+    surface="#1A1A1A",
+    on_surface="#FFFFFF",
+    surface_container_low="#222222",
+    surface_container="#282828",
+    surface_container_high="#333333",
+    surface_container_highest="#3E3E3E",
+    on_surface_variant="#CCCCCC",
+    outline="#888888",
+    outline_variant="#383838",
+    error="#FF4444",
+    on_error="#FFFFFF",
+    bubble_user_bg="#3D0D1E",
+    bubble_user_fg="#FF80A8",
+    bubble_bot_bg="#333333",
+    bubble_bot_fg="#FFFFFF",
+    bubble_system_bg="#3E3E3E",
+    bubble_system_fg="#CCCCCC",
+    dialog_bg="rgba(40, 40, 40, 0.96)",
+    dialog_fg="#FFFFFF",
+    accent="#FF206E",
+    accent_secondary="#00F5FF",
+    gradient_from="#FF206E",
+    gradient_to="#1A1A1A",
+)
+
+# 紫晶幻境：紫渐变
+_PRESET_AMETHYST: ColorTokens = ColorTokens(
+    primary="#8D49FD",
+    on_primary="#FFFFFF",
+    primary_container="#2D1A4D",
+    on_primary_container="#E9D1FF",
+    surface="#1A0E2E",
+    on_surface="#FFFFFF",
+    surface_container_low="#221636",
+    surface_container="#281C3E",
+    surface_container_high="#33274C",
+    surface_container_highest="#3E325A",
+    on_surface_variant="#D4C5E8",
+    outline="#9888B8",
+    outline_variant="#43385A",
+    error="#FFB4AB",
+    on_error="#690005",
+    bubble_user_bg="#2D1A4D",
+    bubble_user_fg="#E9D1FF",
+    bubble_bot_bg="#33274C",
+    bubble_bot_fg="#FFFFFF",
+    bubble_system_bg="#3E325A",
+    bubble_system_fg="#D4C5E8",
+    dialog_bg="rgba(40, 28, 62, 0.96)",
+    dialog_fg="#FFFFFF",
+    accent="#8D49FD",
+    accent_secondary="#5691F3",
+    gradient_from="#8D49FD",
+    gradient_to="#5691F3",
+)
+
+# 琥珀暮光：暖色琥珀/金
+_PRESET_AMBER: ColorTokens = ColorTokens(
+    primary="#FFB347",
+    on_primary="#3D1F00",
+    primary_container="#4A2C0A",
+    on_primary_container="#FFD699",
+    surface="#1C1410",
+    on_surface="#FFFFFF",
+    surface_container_low="#241B16",
+    surface_container="#2A211C",
+    surface_container_high="#352B26",
+    surface_container_highest="#403631",
+    on_surface_variant="#E4D0BD",
+    outline="#9E8B7A",
+    outline_variant="#4E3B35",
+    error="#FFB4AB",
+    on_error="#690005",
+    bubble_user_bg="#4A2C0A",
+    bubble_user_fg="#FFD699",
+    bubble_bot_bg="#352B26",
+    bubble_bot_fg="#FFFFFF",
+    bubble_system_bg="#403631",
+    bubble_system_fg="#E4D0BD",
+    dialog_bg="rgba(42, 33, 28, 0.96)",
+    dialog_fg="#FFFFFF",
+    accent="#FFB347",
+    accent_secondary="#FF6B35",
+    gradient_from="#FFB347",
+    gradient_to="#FF6B35",
+)
+
+# 翡翠琉璃：翡翠/青绿系
+_PRESET_EMERALD: ColorTokens = ColorTokens(
+    primary="#10B981",
+    on_primary="#003D2A",
+    primary_container="#0A3D2E",
+    on_primary_container="#5EEAD4",
+    surface="#0A1F1C",
+    on_surface="#FFFFFF",
+    surface_container_low="#122824",
+    surface_container="#182E2A",
+    surface_container_high="#223A35",
+    surface_container_highest="#2D4640",
+    on_surface_variant="#B0D8CE",
+    outline="#7AA89E",
+    outline_variant="#2D4640",
+    error="#FFB4AB",
+    on_error="#690005",
+    bubble_user_bg="#0A3D2E",
+    bubble_user_fg="#5EEAD4",
+    bubble_bot_bg="#223A35",
+    bubble_bot_fg="#FFFFFF",
+    bubble_system_bg="#2D4640",
+    bubble_system_fg="#B0D8CE",
+    dialog_bg="rgba(24, 46, 42, 0.96)",
+    dialog_fg="#FFFFFF",
+    accent="#10B981",
+    accent_secondary="#06B6D4",
+    gradient_from="#10B981",
+    gradient_to="#06B6D4",
+)
+
+# 玫瑰晨曦（浅色主题）：柔色优雅暖白
+_PRESET_ROSE_DAWN: ColorTokens = ColorTokens(
+    primary="#C77D8A",
+    on_primary="#FFFFFF",
+    primary_container="#F3D5DB",
+    on_primary_container="#5C1A2A",
+    surface="#FFF5F5",
+    on_surface="#2D1A1F",
+    surface_container_low="#F9EDED",
+    surface_container="#F3E5E7",
+    surface_container_high="#EDDCDE",
+    surface_container_highest="#E7D2D5",
+    on_surface_variant="#6B5558",
+    outline="#9E8588",
+    outline_variant="#E0CDD0",
+    error="#BA1A1A",
+    on_error="#FFFFFF",
+    bubble_user_bg="#F3D5DB",
+    bubble_user_fg="#5C1A2A",
+    bubble_bot_bg="#EDDCDE",
+    bubble_bot_fg="#2D1A1F",
+    bubble_system_bg="#E7D2D5",
+    bubble_system_fg="#6B5558",
+    dialog_bg="rgba(243, 229, 231, 0.98)",
+    dialog_fg="#2D1A1F",
+    accent="#C77D8A",
+    accent_secondary="#D4A574",
+    gradient_from="#C77D8A",
+    gradient_to="#D4A574",
+)
+
 PRESETS: dict[str, ColorTokens] = {
     "mofox_blue": _PRESET_MOFOX_BLUE,
     "mofox_blue_light": _PRESET_MOFOX_BLUE_LIGHT,
     "ocean": _PRESET_OCEAN,
     "forest": _PRESET_FOREST,
     "sunset": _PRESET_SUNSET,
+    "aurora": _PRESET_AURORA,
+    "cyber_neon": _PRESET_CYBER_NEON,
+    "amethyst": _PRESET_AMETHYST,
+    "amber": _PRESET_AMBER,
+    "emerald": _PRESET_EMERALD,
+    "rose_dawn": _PRESET_ROSE_DAWN,
 }
 
 PRESET_NAMES: list[str] = list(PRESETS.keys())
@@ -362,6 +563,9 @@ def derive_custom_theme(primary: str, surface: str) -> ColorTokens:
         dialog_bg=_with_alpha(sc, 0.96),
         dialog_fg=fg,
         accent=primary,
+        accent_secondary="",
+        gradient_from="",
+        gradient_to="",
     )
 
 
