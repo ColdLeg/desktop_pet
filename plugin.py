@@ -164,6 +164,9 @@ class DesktopPetAdapter(BaseAdapter):
         self._screenshot_seq = 0
         self._screenshot_lock = threading.Lock()
 
+        # --- 清屏防竞态锁（保证 clear_stream_context 完成后 get_stream_messages 才执行） ---
+        self._context_clear_lock: asyncio.Lock | None = None
+
         # --- 服务 ---
         self._day_night_service: Any = None
         self._system_monitor_service: Any = None
@@ -182,6 +185,7 @@ class DesktopPetAdapter(BaseAdapter):
         """启动适配器：加载配置、启动 GUI 线程、启动服务。"""
         logger.info("DesktopPetAdapter starting")
         self._loop = asyncio.get_running_loop()
+        self._context_clear_lock = asyncio.Lock()
 
         # 加载配置
         if hasattr(self._plugin, "config") and isinstance(self._plugin.config, DesktopPetConfig):
@@ -463,6 +467,20 @@ class DesktopPetAdapter(BaseAdapter):
                     logger.exception("Failed to apply font scale")
             tray_manager.action_set_font_scale.connect(_apply_font_scale)
 
+            # 显示消息气泡切换（运行时切换配置）
+            def _apply_show_messages(enabled: bool) -> None:
+                try:
+                    if self._config and getattr(self._config, "chat", None):
+                        self._config.chat.show_chat_messages = bool(enabled)
+                        chat_window.set_show_messages(enabled)
+                        if enabled:
+                            self._request_chat_history()
+                        self._save_config()
+                        logger.info(f"Show chat messages set to: {enabled}")
+                except Exception:
+                    logger.exception("Failed to set show_chat_messages")
+            tray_manager.action_toggle_show_messages.connect(_apply_show_messages)
+
             # 连接聊天窗口打开信号（显示前先定位）
             def _position_and_show_chat() -> None:
                 # 若启用持久化偏移且偏移非零，按 pet_global + offset 定位
@@ -499,12 +517,25 @@ class DesktopPetAdapter(BaseAdapter):
 
             chat_window.message_sent.connect(_on_message_sent)
 
-            # 连接清屏信号 -> 异步清除 AI 对话上下文
-            chat_window.clear_context_requested.connect(
-                lambda: self._loop.call_soon_threadsafe(
+            # 连接清屏信号 -> 排空 out_queue 中的 load_chat_history + 异步清除 AI 对话上下文
+            def _on_clear_context_requested() -> None:
+                """清屏请求：排空 out_queue 中待处理的 load_chat_history，再异步清除上下文。"""
+                # 排空 out_queue 中的 load_chat_history（防止清屏后旧消息通过队列重现）
+                drained: list[dict[str, Any]] = []
+                while True:
+                    try:
+                        msg = self._out_queue.get_nowait()
+                        if msg.get("action") != "load_chat_history":
+                            drained.append(msg)
+                    except queue.Empty:
+                        break
+                for msg in drained:
+                    self._out_queue.put(msg)
+                # 异步清除上下文
+                self._loop.call_soon_threadsafe(
                     asyncio.create_task, self._handle_clear_context()
                 )
-            )
+            chat_window.clear_context_requested.connect(_on_clear_context_requested)
 
             # 聊天窗口可见性变化 -> 同步适配器 + 触发历史回读 + 加速 pet 输出
             def _on_visibility_changed(visible: bool) -> None:
@@ -761,10 +792,11 @@ class DesktopPetAdapter(BaseAdapter):
         emoji_bytes: bytes = b"",
         voice_bytes: bytes = b"",
     ) -> None:
-        """根据 chat_window 可见性路由消息到正确窗口。
+        """根据 chat_window 可见性和 show_chat_messages 配置路由消息。
 
-        chat 可见 → 进 chat 历史（若未开启显示区，由 chat_window 自动临时显示）
-        chat 不可见 → 进 pet 气泡（emoji/voice 在 pet 上降级为占位文本）
+        chat 可见 + show_chat_messages=True → 进 chat 历史
+        chat 可见 + show_chat_messages=False → 进 pet 气泡
+        chat 不可见 → 进 pet 气泡
 
         Args:
             text: 消息文本。
@@ -775,9 +807,13 @@ class DesktopPetAdapter(BaseAdapter):
         """
         if not text and not emoji_bytes and not voice_bytes:
             return
-        target = "chat" if self._chat_visible.is_set() else "pet"
+        show_messages = bool(
+            self._config and getattr(self._config, "chat", None)
+            and getattr(self._config.chat, "show_chat_messages", False)
+        )
+        target = "chat" if (self._chat_visible.is_set() and show_messages) else "pet"
         logger.info(f"_route_out_message -> {target}, role={role}, text={text[:50]!r}, emoji={len(emoji_bytes)}B, voice={len(voice_bytes)}B")
-        if self._chat_visible.is_set():
+        if self._chat_visible.is_set() and show_messages:
             self._out_queue.put({
                 "action": "append_chat",
                 "role": role,
@@ -858,7 +894,11 @@ class DesktopPetAdapter(BaseAdapter):
         self._loop.create_task(self._fetch_and_send_history())
 
     async def _fetch_and_send_history(self) -> None:
-        """从 StreamManager 拉历史消息，封装成 chat_window 可识别的格式。"""
+        """从 StreamManager 拉历史消息，封装成 chat_window 可识别的格式。
+
+        在 _context_clear_lock 内完成 DB 查询 + 消息处理 + 入队，
+        确保「查询-入队」与「清屏-排空队列」互斥，消除竞态窗口。
+        """
         try:
             from src.core.managers.stream_manager import get_stream_manager
             from src.core.models.stream import ChatStream
@@ -869,43 +909,48 @@ class DesktopPetAdapter(BaseAdapter):
             platform = "desktop_pet"
             stream_id = ChatStream.generate_stream_id(platform=platform, user_id=user_id)
             sm = get_stream_manager()
-            # 拉最近 50 条
+            # 拉最近 50 条（在锁内完成查询+处理+入队，与清屏互斥）
             try:
-                result = sm.get_stream_messages(stream_id, limit=50, offset=0)
-                # 兼容协程与同步两种实现
-                if hasattr(result, "__await__"):
-                    msgs = await result
-                else:
-                    msgs = result
+                async with self._context_clear_lock:
+                    result = sm.get_stream_messages(stream_id, limit=50, offset=0)
+                    # 兼容协程与同步两种实现
+                    if hasattr(result, "__await__"):
+                        msgs = await result
+                    else:
+                        msgs = result
+                    if not msgs:
+                        return
+                    history: list[dict[str, Any]] = []
+                    for m in msgs:
+                        # 字段名按主程序 Messages 表结构
+                        role = "bot" if getattr(m, "sender_role", "") == "bot" else "user"
+                        content = getattr(m, "processed_plain_text", None) or getattr(m, "content", "") or getattr(m, "text", "") or ""
+                        if isinstance(content, list):
+                            # message_segment 列表
+                            txt = ""
+                            for seg in content:
+                                if isinstance(seg, dict) and seg.get("type") == "text":
+                                    txt += str(seg.get("data") or "")
+                            content = txt
+                        elif not isinstance(content, str):
+                            content = str(content)
+                        if not content.strip():
+                            continue
+                        history.append({"role": role, "text": content, "reply_to": ""})
+                    if history:
+                        self._out_queue.put({"action": "load_chat_history", "messages": history})
             except Exception:
                 logger.exception("Failed to fetch stream messages")
                 return
-            if not msgs:
-                return
-            history: list[dict[str, Any]] = []
-            for m in msgs:
-                # 字段名按主程序 Messages 表结构
-                role = "bot" if getattr(m, "sender_role", "") == "bot" else "user"
-                content = getattr(m, "processed_plain_text", None) or getattr(m, "content", "") or getattr(m, "text", "") or ""
-                if isinstance(content, list):
-                    # message_segment 列表
-                    txt = ""
-                    for seg in content:
-                        if isinstance(seg, dict) and seg.get("type") == "text":
-                            txt += str(seg.get("data") or "")
-                    content = txt
-                elif not isinstance(content, str):
-                    content = str(content)
-                if not content.strip():
-                    continue
-                history.append({"role": role, "text": content, "reply_to": ""})
-            if history:
-                self._out_queue.put({"action": "load_chat_history", "messages": history})
         except Exception:
             logger.exception("Failed to fetch chat history")
 
     async def _handle_clear_context(self) -> None:
-        """处理清屏请求：清除桌宠私聊流的 AI 对话上下文。"""
+        """处理清屏请求：清除桌宠私聊流的 AI 对话上下文。
+
+        在 _context_clear_lock 内完成 DB 清屏 + 排空 out_queue 中的 load_chat_history，
+        确保与 _fetch_and_send_history 的「查询-入队」互斥。
+        """
         try:
             from src.core.managers.stream_manager import get_stream_manager
             from src.core.models.stream import ChatStream
@@ -916,7 +961,19 @@ class DesktopPetAdapter(BaseAdapter):
             platform = "desktop_pet"
             stream_id = ChatStream.generate_stream_id(platform=platform, user_id=user_id)
             sm = get_stream_manager()
-            await sm.clear_stream_context(stream_id)
+            async with self._context_clear_lock:
+                await sm.clear_stream_context(stream_id)
+                # 排空 out_queue 中的 load_chat_history（防止竞态：fetch 在 clear 之前入队的旧消息）
+                drained: list[dict[str, Any]] = []
+                while True:
+                    try:
+                        msg = self._out_queue.get_nowait()
+                        if msg.get("action") != "load_chat_history":
+                            drained.append(msg)
+                    except queue.Empty:
+                        break
+                for msg in drained:
+                    self._out_queue.put(msg)
             logger.info(f"Stream context cleared for desktop_pet stream: {stream_id}")
         except Exception:
             logger.exception("Failed to clear stream context")

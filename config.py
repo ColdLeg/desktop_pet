@@ -207,7 +207,7 @@ class DesktopPetConfig(BaseConfig):
             tag="ai",
         )
         interval: int = Field(
-            default=30,
+            default=300,
             description="截图间隔（秒，最小 5）",
             label="截图间隔",
             tag="timer",

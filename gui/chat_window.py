@@ -772,7 +772,7 @@ class ChatWindow(QWidget):
 
     def _toggle_messages_area(self) -> None:
         """双击标题栏：切换消息区折叠/展开。"""
-        if not self._messages_built:
+        if not self._messages_built or not self._show_messages:
             return
         if self._messages_collapsed:
             self._expand_messages_area()
@@ -799,7 +799,7 @@ class ChatWindow(QWidget):
         if text:
             self.message_sent.emit(text)
             self._input.clear()
-            if self._messages_built and self._messages_collapsed:
+            if self._messages_built and self._messages_collapsed and self._show_messages:
                 self._expand_messages_area()
 
     def _on_clear(self) -> None:
@@ -818,6 +818,26 @@ class ChatWindow(QWidget):
             if w is not None:
                 w.deleteLater()
 
+    def set_show_messages(self, show: bool) -> None:
+        """运行时切换消息显示模式。
+
+        show=True  → 构建消息区（如未构建）并展开到完整高度
+        show=False → 清空气泡并折叠到仅输入栏高度
+        """
+        self._show_messages = show
+        if show:
+            if not self._messages_built:
+                self._ensure_messages_built()
+                # _ensure_messages_built 从零构建时不触发动画，手动展开
+                target_h = int(self.WIN_HEIGHT_FULL * self._scale)
+                self._animate_size(target_h)
+            elif self._messages_collapsed:
+                self._expand_messages_area()
+        else:
+            self.clear_messages()
+            if self._messages_built and not self._messages_collapsed:
+                self._collapse_messages_area()
+
     def append_message(
         self,
         role: str,
@@ -829,10 +849,11 @@ class ChatWindow(QWidget):
         """向消息历史追加一条消息气泡。
 
         当 show_chat_messages=False 时：
-        - system 消息忽略（无显示区）
-        - 任意非 system 消息触发延迟构建消息区，并以动画过渡到完整高度
+        - 直接返回，不触发消息区构建（避免窗口展开）
         当 show_chat_messages=True 时正常追加气泡。
         """
+        if not self._show_messages:
+            return
         if not self._messages_built or self._messages_collapsed:
             if role == "system":
                 return
@@ -1051,15 +1072,16 @@ class ChatWindow(QWidget):
     def load_history(self, messages: list) -> None:
         """批量加载历史消息并渲染。
 
-        修复：show_chat_messages=False 时也触发延迟构建消息区，
-        使历史可见（原实现直接 return 导致历史丢失）。
+        show_chat_messages=False 时直接返回，不加载历史（避免展开消息区）。
 
         Args:
             messages: 历史消息列表，每项为 dict {"role": ..., "text": ...}。
         """
         if not messages:
             return
-        # 即使 _show_messages=False，只要有历史也展开消息区
+        if not self._show_messages:
+            return
+        # 确保消息区已构建并展开
         if not self._messages_built or self._messages_collapsed:
             self._ensure_messages_built()
         # 清空已有消息气泡（保留末尾的 stretch）
@@ -1095,7 +1117,12 @@ class ChatWindow(QWidget):
                 self._message_layout.insertWidget(self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignCenter)
             else:
                 self._message_layout.insertWidget(self._message_layout.count() - 1, bubble, alignment=Qt.AlignmentFlag.AlignLeft)
-        QTimer.singleShot(0, self._scroll_to_bottom)
+        def _deferred_scroll() -> None:
+            self._message_layout.invalidate()
+            self._message_layout.activate()
+            self._scroll_to_bottom()
+
+        QTimer.singleShot(0, _deferred_scroll)
 
     def _is_in_title_bar(self, widget: QWidget) -> bool:
         """检查 widget 是否属于标题栏。"""

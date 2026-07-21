@@ -48,6 +48,7 @@ class TrayManager(QObject):
     action_quit = Signal()
     action_set_opacity = Signal(float)
     action_set_chat_position_mode = Signal(str)
+    action_toggle_show_messages = Signal(bool)
 
     # 硬编码托盘属性
     TOOLTIP = "MoFox 桌面宠物"
@@ -122,6 +123,15 @@ class TrayManager(QObject):
         chat_hide = QAction("隐藏聊天", petchat_menu)
         chat_hide.triggered.connect(self.action_chat_hide.emit)
         petchat_menu.addAction(chat_hide)
+        petchat_menu.addSeparator()
+        # 显示消息气泡（运行时切换 show_chat_messages）
+        show_messages_act = QAction("显示消息气泡", petchat_menu)
+        show_messages_act.setCheckable(True)
+        show_messages_act.setChecked(self._current_show_messages())
+        show_messages_act.triggered.connect(
+            lambda checked: self.action_toggle_show_messages.emit(checked)
+        )
+        petchat_menu.addAction(show_messages_act)
         petchat_menu.addSeparator()
         # 聊天位置模式
         mode_independent = QAction("聊天独立位置", petchat_menu)
@@ -220,6 +230,15 @@ class TrayManager(QObject):
         except Exception:
             pass
         return "independent"
+
+    def _current_show_messages(self) -> bool:
+        """读取当前 show_chat_messages 配置。"""
+        try:
+            if self._config and getattr(self._config, "chat", None):
+                return bool(getattr(self._config.chat, "show_chat_messages", False))
+        except Exception:
+            pass
+        return False
 
     def _create_icon(self) -> QIcon:
         """创建托盘图标。
