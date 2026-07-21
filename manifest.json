@@ -1,7 +1,7 @@
 {
     "name": "desktop_pet",
     "display_name": "MoFox 桌宠",
-    "version": "0.2.1",
+    "version": "1.0.0",
     "description": "MoFox 桌宠插件 - 将桌面桌宠接入 MoFox 聊天流（MD3 风格 + SVG 矢量 + 自定义配色/字体）",
     "categories": ["fun"],
     "tags": ["desktop-pet", "gui", "companion", "pyside6", "material-design-3", "svg"],

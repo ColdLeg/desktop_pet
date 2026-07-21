@@ -1288,7 +1288,7 @@ class DesktopPetPlugin(BasePlugin):
 
     plugin_name = "desktop_pet"
     plugin_description = "具有对话、系统监控和剪贴板集成功能的桌面宠物"
-    plugin_version = "0.2.1"
+    plugin_version = "1.0.0"
     configs = [DesktopPetConfig]
 
     def get_components(self) -> list[type]:
