@@ -7,7 +7,7 @@ from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_se
 
 class DesktopPetConfig(BaseConfig):
     """桌宠插件配置"""
-    config_name: ClassVar[str] = "config"
+    name: ClassVar[str] = "config"
     config_description: ClassVar[str] = "MoFox 桌宠插件配置"
 
     @config_section("plugin", title="插件设置", tag="plugin")

@@ -39,9 +39,9 @@ class ClipboardWatcherService(BaseService):
     reminder 标注来源为剪贴板，供后续 LLM 调用读取，但自身不触发调用。
     """
 
-    service_name = "clipboard_watcher"
+    name = "clipboard_watcher"
     service_description = "桌面宠物的剪贴板变化检测服务（被动上下文）"
-    version = "0.2.1"
+    version = "1.0.0"
 
     def __init__(self, plugin: BasePlugin) -> None:
         """初始化剪贴板监控服务。"""

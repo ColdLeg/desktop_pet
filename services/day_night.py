@@ -36,9 +36,9 @@ class DayNightService(BaseService):
     通过定时循环主动检测切换，无需依赖外部查询。
     """
 
-    service_name = "day_night"
+    name = "day_night"
     service_description = "桌面宠物的日/夜循环与问候服务"
-    version = "0.2.0"
+    version = "1.0.0"
 
     # 定时检查间隔（秒）。600 秒 = 10 分钟，足够捕捉小时级切换。
     CHECK_INTERVAL_SEC = 600

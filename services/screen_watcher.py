@@ -32,9 +32,9 @@ if TYPE_CHECKING:
 class ScreenWatcherService(BaseService):
     """定时截图主动监控服务。"""
 
-    service_name = "screen_watcher"
+    name = "screen_watcher"
     service_description = "桌面宠物的定时截图 VLM 识别主动搭话服务"
-    version = "0.1.0"
+    version = "1.0.0"
 
     def __init__(self, plugin: BasePlugin) -> None:
         super().__init__(plugin)

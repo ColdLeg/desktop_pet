@@ -31,9 +31,9 @@ class SystemMonitorService(BaseService):
     注入 desktop_pet_system_status system reminder。
     """
 
-    service_name = "system_monitor"
+    name = "system_monitor"
     service_description = "桌面宠物的 CPU/内存使用率监控服务"
-    version = "0.2.0"
+    version = "1.0.0"
 
     def __init__(self, plugin: BasePlugin) -> None:
         """初始化系统监控服务。"""

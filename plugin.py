@@ -131,8 +131,9 @@ class DesktopPetAdapter(BaseAdapter):
     PySide6 GUI 之间建立桥梁。
     """
 
-    adapter_name = "desktop_pet_adapter"
+    name = "desktop_pet_adapter"
     adapter_description = "具有系统感知能力的桌面宠物 GUI 适配器"
+    adapter_version = "1.0.0"
     platform = "desktop_pet"
 
     def __init__(self, core_sink=None, plugin: BasePlugin = None, **kwargs) -> None:
@@ -1302,3 +1303,4 @@ class DesktopPetPlugin(BasePlugin):
     async def on_plugin_unloaded(self) -> None:
         """插件卸载时回调。适配器由 AdapterManager 管理生命周期。"""
         logger.info("DesktopPetPlugin unloaded")
+
