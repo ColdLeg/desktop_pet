@@ -1,0 +1,1 @@
+"""desktop_pet 内置 B 站直播弹幕模块（HTTP API / 协议 / WS / 路由）。"""

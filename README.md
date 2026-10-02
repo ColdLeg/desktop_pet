@@ -236,6 +236,11 @@ desktop_pet/
 - 修复 `_send_platform_message` 入口日志打印完整 envelope（含 base64 音频数据）导致日志膨胀
 - 修复 `_write_back_to_private_stream` 中 `add_sent_message_to_history` 返回协程时未 await
 
+### 2026-07-10
+
+#### Voice 消息处理
+- 新增哔哩哔哩直播系统（参考言柒的bilibili_live_adapter https://github.com/tt-P607/bilibili_live_adapter）
+
 ## 📄 开源协议
 
 本项目采用 [AGPL-v3.0](LICENSE) 协议。

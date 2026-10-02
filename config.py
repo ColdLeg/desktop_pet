@@ -25,6 +25,26 @@ class DesktopPetConfig(BaseConfig):
     @config_section("pet", title="桌宠外观", tag="general")
     class PetSection(SectionBase):
         """桌宠外观配置"""
+        default_image_dir: str = Field(
+            default="assets/default",
+            description="默认/白天状态图片文件夹路径（相对于插件目录，目录内图片按文件名排序自动轮播）",
+            label="默认图片目录",
+            tag="file",
+        )
+        sleep_image_dir: str = Field(
+            default="assets/sleep",
+            description="睡眠状态图片文件夹路径（相对于插件目录，进入夜晚模式后自动轮播此目录图片）",
+            label="睡眠图片目录",
+            tag="file",
+        )
+        image_switch_interval: float = Field(
+            default=3.0,
+            description="图片轮播切换间隔（秒）",
+            label="图片切换间隔",
+            tag="timer",
+            ge=0.5,
+            le=60.0,
+        )
         normal1_image: str = Field(default="", description="闭嘴/静止状态图片路径", label="闭嘴状态图", tag="file")
         normal2_image: str = Field(default="", description="张嘴状态图片路径", label="张嘴状态图", tag="file")
         sleep_image: str = Field(default="", description="睡眠状态图片路径", label="睡眠状态图", tag="file")
@@ -256,6 +276,17 @@ class DesktopPetConfig(BaseConfig):
         provider: str = Field(default="", description="TTS provider 名称（留空使用服务端默认 provider）", label="TTS Provider", tag="ai")
         volume: float = Field(default=0.8, description="TTS 语音播放音量（0.0~1.0）", label="音量", tag="general", ge=0.0, le=1.0, input_type="slider", step=0.05)
 
+    @config_section("bilibili", title="B站直播", tag="ai")
+    class BilibiliSection(SectionBase):
+        """B 站直播弹幕接入配置"""
+        enabled: bool = Field(default=False, description="启用 B 站直播弹幕接入", label="启用B站弹幕", tag="ai")
+        access_key_id: str = Field(default="", description="AccessKey ID（开放平台 → 应用管理）", label="AccessKey ID", tag="ai")
+        access_key_secret: str = Field(default="", description="AccessKey Secret（HMAC-SHA256 签名密钥）", label="AccessKey Secret", tag="ai")
+        app_id: int = Field(default=0, description="应用 ID（开放平台创建应用后生成）", label="App ID", tag="ai")
+        id_code: str = Field(default="", description="主播身份码（直播姬'主播专用'页面查看）", label="身份码", tag="ai")
+        host: str = Field(default="https://live-open.biliapi.com", description="API 主机域名", label="API 主机", tag="ai")
+        stream_name: str = Field(default="", description="聊天流显示名（留空用 B站直播间{room_id}）", label="流名称", tag="ai")
+
     plugin: PluginSection = Field(default_factory=PluginSection)
     pet: PetSection = Field(default_factory=PetSection)
     sleep: SleepSection = Field(default_factory=SleepSection)
@@ -265,3 +296,4 @@ class DesktopPetConfig(BaseConfig):
     theme: ThemeSection = Field(default_factory=ThemeSection)
     screen_watcher: ScreenWatcherSection = Field(default_factory=ScreenWatcherSection)
     tts: TTSSection = Field(default_factory=TTSSection)
+    bilibili: BilibiliSection = Field(default_factory=BilibiliSection)

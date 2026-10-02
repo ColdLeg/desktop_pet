@@ -21,7 +21,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QMessageBox
 
 from .svg_assets import TRAY_ICON_SVG
-from .theme import PRESET_NAMES
+from .theme import PRESET_NAMES, get_theme
 
 if TYPE_CHECKING:
     from ..config import DesktopPetConfig
@@ -49,6 +49,8 @@ class TrayManager(QObject):
     action_set_opacity = Signal(float)
     action_set_chat_position_mode = Signal(str)
     action_toggle_show_messages = Signal(bool)
+    action_toggle_bilibili = Signal(bool)
+    action_toggle_manual_sleep = Signal(bool)
 
     # 硬编码托盘属性
     TOOLTIP = "MoFox 桌面宠物"
@@ -79,6 +81,7 @@ class TrayManager(QObject):
         # 菜单在每次即将显示时重建，确保切换配置后勾选状态实时刷新
         # （透明度/字号/配色/位置模式等 setCheckable 项的 checked 状态）
         menu = QMenu()
+        menu.setStyleSheet(self._menu_qss())
         self._tray_icon.setContextMenu(menu)
         menu.aboutToShow.connect(lambda: self._rebuild_context_menu(menu))
 
@@ -87,18 +90,42 @@ class TrayManager(QObject):
     def _rebuild_context_menu(self, menu: QMenu) -> None:
         """aboutToShow 时清空并重建菜单，使勾选状态反映最新配置。"""
         menu.clear()
+        menu.setStyleSheet(self._menu_qss())
         self.build_menu(menu, with_quit_confirm=True)
+
+    def _menu_qss(self) -> str:
+        """生成原生 QMenu 的 QSS（尽力美化，跟随主题配色）。"""
+        t = get_theme(self._config)
+        return f"""
+        QMenu {{
+            background-color: {t.surface_container};
+            border: 1px solid {t.outline_variant};
+            padding: 4px;
+        }}
+        QMenu::item {{
+            color: {t.on_surface};
+            padding: 6px 24px;
+            border-radius: 4px;
+        }}
+        QMenu::item:selected {{
+            background-color: {t.surface_container_high};
+        }}
+        QMenu::item:disabled {{
+            color: {t.outline};
+        }}
+        QMenu::separator {{
+            height: 1px;
+            background-color: {t.outline_variant};
+            margin: 4px 8px;
+        }}
+        """
 
     def build_menu(self, menu: QMenu, *, with_quit_confirm: bool = True) -> None:
         """把共用菜单项填入指定 menu。
 
         托盘菜单和桌宠右键菜单都复用此方法。子菜单：透明度、Pet/Chat、配色。
+        聊天入口由单击桌宠承担（chat_toggled），菜单不再单独提供聊天项。
         """
-        # 聊天
-        chat_action = QAction("聊天...", self)
-        chat_action.triggered.connect(self.action_chat.emit)
-        menu.addAction(chat_action)
-
         menu.addSeparator()
 
         # 透明度子菜单
@@ -148,6 +175,23 @@ class TrayManager(QObject):
             lambda checked=False: self.action_set_chat_position_mode.emit("follow")
         )
         petchat_menu.addAction(mode_follow)
+        petchat_menu.addSeparator()
+        # B 站弹幕开关
+        bilibili_act = QAction("B站弹幕", petchat_menu)
+        bilibili_act.setCheckable(True)
+        bilibili_act.setChecked(self._current_bilibili_enabled())
+        bilibili_act.triggered.connect(
+            lambda checked: self.action_toggle_bilibili.emit(checked)
+        )
+        petchat_menu.addAction(bilibili_act)
+        # 主动休眠开关（与按时间表休眠并行：两者任一生效即休眠）
+        manual_sleep_act = QAction("主动休眠", petchat_menu)
+        manual_sleep_act.setCheckable(True)
+        manual_sleep_act.setChecked(self._current_manual_sleep())
+        manual_sleep_act.triggered.connect(
+            lambda checked: self.action_toggle_manual_sleep.emit(checked)
+        )
+        petchat_menu.addAction(manual_sleep_act)
 
         # 配色子菜单
         theme_menu = menu.addMenu("配色方案")
@@ -238,6 +282,25 @@ class TrayManager(QObject):
                 return bool(getattr(self._config.chat, "show_chat_messages", False))
         except Exception:
             pass
+        return False
+
+    def _current_bilibili_enabled(self) -> bool:
+        """读取当前 B 站弹幕启用状态。"""
+        try:
+            if self._config and getattr(self._config, "bilibili", None):
+                return bool(getattr(self._config.bilibili, "enabled", False))
+        except Exception:
+            pass
+        return False
+
+    def _current_manual_sleep(self) -> bool:
+        """读取当前主动休眠状态（运行时状态，不落盘，从托盘管理器查询）。"""
+        getter = getattr(self, "_manual_sleep_getter", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                pass
         return False
 
     def _create_icon(self) -> QIcon:
@@ -357,7 +420,12 @@ class TrayManager(QObject):
             self.action_show.emit()
 
     def _on_quit(self) -> None:
-        """处理退出动作，带可选的确认对话框。"""
+        """处理退出动作，带可选的确认对话框。
+
+        只发射 action_quit 信号，由 adapter 走优雅关闭流程（先停服务，
+        再通知 GUI 线程退出）；不在此处直接 QApplication.quit()，否则会
+        抢在服务停止前退出 GUI。
+        """
         if self.CONFIRM_EXIT:
             reply = QMessageBox.question(
                 None,
@@ -370,4 +438,3 @@ class TrayManager(QObject):
                 return
 
         self.action_quit.emit()
-        QApplication.quit()

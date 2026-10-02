@@ -46,9 +46,55 @@ class ScreenWatcherService(BaseService):
         # 由 plugin 注入：用于请求 GUI 线程截图、用于 put 用户消息到 in_queue
         self._adapter: Any = None
 
+        # 主动休眠状态（由用户通过菜单切换；与按时间表的定时休眠并行，
+        # 两者任一生效即视为休眠中，休眠期间不截图）
+        self._manual_sleeping: bool = False
+
     def bind_adapter(self, adapter: Any) -> None:
         """注入 DesktopPetAdapter 实例，用于截图请求和 in_queue 投递。"""
         self._adapter = adapter
+
+    def set_manual_sleep(self, sleeping: bool) -> None:
+        """设置/解除主动休眠。
+
+        与按时间表的定时休眠（sleep 分区）相互独立、可叠加：
+        任一处于休眠态即暂停截图；主动休眠不受定时休眠时段结束影响。
+
+        Args:
+            sleeping: True 进入主动休眠，False 解除。
+        """
+        old = self._manual_sleeping
+        self._manual_sleeping = sleeping
+        if old != sleeping:
+            self._log.info(f"Manual sleep {'enabled' if sleeping else 'disabled'}")
+
+    @property
+    def manual_sleeping(self) -> bool:
+        """当前是否处于主动休眠。"""
+        return self._manual_sleeping
+
+    def _is_sleeping_now(self) -> bool:
+        """判断当前是否处于休眠态：主动休眠 或 定时休眠时段内。
+
+        Returns:
+            bool: True 表示休眠中（应跳过截图）。
+        """
+        if self._manual_sleeping:
+            return True
+        cfg = self._config
+        if cfg is None:
+            return False
+        try:
+            if not cfg.sleep.enabled:
+                return False
+            from datetime import datetime
+            hour = datetime.now().hour
+            wake = int(cfg.sleep.wake_start_hour)
+            sleep = int(cfg.sleep.sleep_start_hour)
+            # 白天：wake <= hour < sleep；其余为定时休眠时段
+            return not (wake <= hour < sleep)
+        except Exception:
+            return False
 
     def _get_config(self) -> DesktopPetConfig | None:
         if self.plugin and hasattr(self.plugin, "config"):
@@ -77,6 +123,10 @@ class ScreenWatcherService(BaseService):
         while True:
             try:
                 await asyncio.sleep(interval)
+                # 休眠中（主动休眠 或 定时休眠时段）不截图
+                if self._is_sleeping_now():
+                    self._log.debug("Sleeping (manual or scheduled), skip screenshot tick")
+                    continue
                 await self._tick()
             except asyncio.CancelledError:
                 break

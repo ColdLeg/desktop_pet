@@ -1073,13 +1073,18 @@ class ChatWindow(QWidget):
         """批量加载历史消息并渲染。
 
         show_chat_messages=False 时直接返回，不加载历史（避免展开消息区）。
+        空列表同样执行清空：fetch 结果为空（清屏后/落库竞态）时必须把
+        残留气泡清掉，否则下次打开会叠加重复消息。
 
         Args:
             messages: 历史消息列表，每项为 dict {"role": ..., "text": ...}。
         """
-        if not messages:
-            return
         if not self._show_messages:
+            return
+        if not messages:
+            # 空历史也清屏：防止上次会话残留气泡与新消息叠加
+            if self._messages_built and hasattr(self, "_message_layout"):
+                self.clear_messages()
             return
         # 确保消息区已构建并展开
         if not self._messages_built or self._messages_collapsed:

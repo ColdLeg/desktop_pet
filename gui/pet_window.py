@@ -17,10 +17,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QMouseEvent, QPainter, QPixmap
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent, QMovie, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication, QLabel, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QSizeGrip, QVBoxLayout, QWidget
 
 from .dialog_box import DialogBox
 from .svg_assets import PET_DEFAULT_SVG
@@ -31,22 +31,36 @@ if TYPE_CHECKING:
 
 
 class SvgPetLabel(QLabel):
-    """用 QSvgRenderer 绘制 SVG 的 QLabel 子类。
+    """用 QSvgRenderer 绘制 SVG / QMovie 播放 GIF / QPixmap 位图的 QLabel 子类。
 
     兼容现有调用方（`pixmap()`/`setPixmap()`）：
     - setPixmap(svg_bytes) 接收 SVG 字节流并加载到 QSvgRenderer
-    - pixmap() 返回一个 QSize 占位对象供现有定位逻辑使用
-    - paintEvent 用 QSvgRenderer 渲染到 widget 的物理像素，高 DPI 锐利
+    - setPixmap(QMovie) 接收 QMovie 并播放 GIF 动画
+    - setPixmap(QPixmap) 接收静态位图
+    - paintEvent 根据当前来源类型渲染
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._svg_renderer: QSvgRenderer | None = None
         self._fallback_pixmap: QPixmap | None = None
+        self._movie: QMovie | None = None
         self._logical_size: QSize = QSize(0, 0)
 
-    def setPixmap(self, source: bytes | QPixmap) -> None:  # type: ignore[override]
-        """接收 SVG 字节流或 QPixmap 兜底图。"""
+    def setPixmap(self, source: bytes | QPixmap | QMovie) -> None:  # type: ignore[override]
+        """接收 SVG 字节流、QMovie（GIF 动画）或 QPixmap 兜底图。"""
+        # 停止旧 movie
+        self.stop_movie()
+
+        if isinstance(source, QMovie):
+            self._svg_renderer = None
+            self._fallback_pixmap = None
+            self._movie = source
+            self._movie.setParent(self)
+            self._movie.frameChanged.connect(self._on_movie_frame)
+            self._movie.start()
+            return
+
         if isinstance(source, (bytes, bytearray)):
             renderer = QSvgRenderer(bytes(source))
             if renderer.isValid():
@@ -66,8 +80,24 @@ class SvgPetLabel(QLabel):
         self._fallback_pixmap = None
         self.update()
 
+    def stop_movie(self) -> None:
+        """停止当前 GIF 动画播放。"""
+        if self._movie is not None:
+            try:
+                self._movie.frameChanged.disconnect(self._on_movie_frame)
+            except Exception:
+                pass
+            self._movie.stop()
+            self._movie = None
+
+    def _on_movie_frame(self, _frame: int) -> None:
+        """QMovie 帧更新时触发重绘。"""
+        self.update()
+
     def pixmap(self) -> QPixmap:  # type: ignore[override]
         """返回占位 QPixmap，尺寸与当前 widget 逻辑尺寸一致。"""
+        if self._movie is not None and self._movie.isValid():
+            return self._movie.currentPixmap()
         if self._fallback_pixmap is not None and not self._fallback_pixmap.isNull():
             return self._fallback_pixmap
         return QPixmap(self._logical_size)
@@ -79,8 +109,8 @@ class SvgPetLabel(QLabel):
     def _render_target_rect(self) -> QRect:
         """计算实际渲染内容在 widget 内的目标矩形（居中、保持纵横比）。
 
-        SVG 矢量与位图兜底共用此算法；paintEvent 据此绘制，rendered_rect
-        据此对外暴露，确保两者永不发散。
+        SVG 矢量、QMovie GIF、位图共用此算法；paintEvent 据此绘制，
+        rendered_rect 据此对外暴露，确保两者永不发散。
         """
         w = max(1, self.width())
         h = max(1, self.height())
@@ -91,6 +121,14 @@ class SvgPetLabel(QLabel):
             scale = min(w / vw, h / vh)
             dw = int(vw * scale)
             dh = int(vh * scale)
+            return QRect((w - dw) // 2, (h - dh) // 2, dw, dh)
+        if self._movie is not None and self._movie.isValid():
+            sz = self._movie.currentPixmap().size()
+            pw = max(1, sz.width())
+            ph = max(1, sz.height())
+            scale = min(w / pw, h / ph)
+            dw = int(pw * scale)
+            dh = int(ph * scale)
             return QRect((w - dw) // 2, (h - dh) // 2, dw, dh)
         if self._fallback_pixmap is not None and not self._fallback_pixmap.isNull():
             pm = self._fallback_pixmap
@@ -111,11 +149,23 @@ class SvgPetLabel(QLabel):
         return self._render_target_rect()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
-        """用 QSvgRenderer 渲染到 widget 物理像素。"""
+        """根据当前内容类型渲染：SVG 矢量 / GIF 动画 / 静态位图。"""
         if self._svg_renderer is not None:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             self._svg_renderer.render(painter, self._render_target_rect())
+            return
+
+        if self._movie is not None and self._movie.isValid():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            r = self._render_target_rect()
+            pm = self._movie.currentPixmap().scaled(
+                r.width(), r.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(r.topLeft(), pm)
             return
 
         if self._fallback_pixmap is not None and not self._fallback_pixmap.isNull():
@@ -180,15 +230,44 @@ class PetWindow(QWidget):
             self._default_image = config.pet.default_image
             self._normal1_image = config.pet.normal1_image
             self._normal2_image = config.pet.normal2_image
+            self._default_image_dir = getattr(config.pet, "default_image_dir", "assets/default") or "assets/default"
+            self._sleep_image_dir = getattr(config.pet, "sleep_image_dir", "assets/sleep") or "assets/sleep"
+            self._switch_interval = float(getattr(config.pet, "image_switch_interval", 3.0) or 3.0)
         else:
             self._win_w = 200
             self._win_h = 200
             self._default_image = ""
             self._normal1_image = ""
             self._normal2_image = ""
+            self._default_image_dir = "assets/default"
+            self._sleep_image_dir = "assets/sleep"
+            self._switch_interval = 3.0
 
-        # 按主屏面积 1% 重新计算窗口尺寸
+        # --- 图片轮播状态 ---
+        self._default_images: list[QPixmap | bytes | QMovie] = []
+        self._sleep_images: list[QPixmap | bytes | QMovie] = []
+        self._current_image_index: int = 0
+        self._image_switch_timer: QTimer | None = None
+        self._is_sleeping: bool = False
+        # 主动休眠（用户通过菜单切换；与定时休眠并行，任一生效即显示睡眠图组）
+        self._manual_sleeping: bool = False
+
+        # --- 调整大小模式 ---
+        self._resize_mode: bool = False
+        self._size_grip: QSizeGrip | None = None
+
+        # --- 单击检测（单击切换聊天窗口，与双击调整大小区分） ---
+        self._click_timer: QTimer | None = None
+        self._press_global_pos: QPoint | None = None
+
+        # 按主屏面积 1% 重新计算窗口尺寸（仅当用户未自定义尺寸时）
+        _custom_w = self._win_w
+        _custom_h = self._win_h
         self._apply_screen_area_ratio(0.01)
+        # 若用户已自定义尺寸（非默认 200），恢复自定义值
+        if _custom_w != 200 or _custom_h != 200:
+            self._win_w = _custom_w
+            self._win_h = _custom_h
 
         # --- 拖拽状态 ---
         self._drag_position: QPoint | None = None
@@ -233,7 +312,8 @@ class PetWindow(QWidget):
 
         self.setWindowFlags(flags)
         self.setWindowTitle(self.WIN_TITLE)
-        self.setFixedSize(self._win_w, self._win_h)
+        self.setMinimumSize(64, 64)
+        self.resize(self._win_w, self._win_h)
 
         if self.CLICK_THROUGH:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -244,28 +324,228 @@ class PetWindow(QWidget):
         self._pet_label = SvgPetLabel(self)
         self._pet_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._load_pet_image()
+        self._start_image_rotation()
         layout.addWidget(self._pet_label)
 
         self._dialog_box = DialogBox(self, self._config)
         self._position_dialog()
 
+    # ---- 图片目录加载与轮播 ----
+
+    @staticmethod
+    def _plugin_root() -> Path:
+        """返回插件根目录（pet_window.py 上两级）。"""
+        return Path(__file__).resolve().parent.parent
+
+    _SUPPORTED_IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp")
+
+    def _load_images_from_dir(self, dir_path: str) -> list[QPixmap | bytes | QMovie]:
+        """从指定目录加载所有图片文件，按文件名自然排序。
+
+        目录路径相对于插件根目录；绝对路径直接使用。
+        GIF 文件返回 QMovie（动画），SVG 返回 bytes，其他返回预缩放 QPixmap。
+        目录为空或不存在时返回空列表。
+
+        Args:
+            dir_path: 图片目录路径（相对或绝对）。
+
+        Returns:
+            图片源列表（QPixmap / SVG bytes / QMovie）。
+        """
+        if not dir_path:
+            return []
+        path = Path(dir_path)
+        if not path.is_absolute():
+            path = self._plugin_root() / path
+        if not path.is_dir():
+            return []
+
+        # 收集支持扩展名的文件，按文件名自然排序
+        import re
+        files: list[Path] = []
+        for f in path.iterdir():
+            if f.is_file() and f.suffix.lower() in self._SUPPORTED_IMAGE_EXTENSIONS:
+                files.append(f)
+        if not files:
+            return []
+
+        # 自然排序：default2.png 排在 default10.png 前面
+        def _natural_key(name: str) -> list:
+            parts = re.split(r"(\d+)", name)
+            return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+        files.sort(key=lambda f: _natural_key(f.name))
+
+        result: list[QPixmap | bytes | QMovie] = []
+        win_w = max(1, self._win_w)
+        win_h = max(1, self._win_h)
+        for f in files:
+            # GIF 文件：使用 QMovie 播放动画（缩放由 paintEvent 统一处理）
+            if f.suffix.lower() == ".gif":
+                try:
+                    movie = QMovie(str(f))
+                    if movie.isValid():
+                        result.append(movie)
+                except Exception:
+                    pass
+                continue
+
+            # SVG 文件：直接存储原始字节，由 SvgPetLabel.setPixmap() 处理
+            if f.suffix.lower() == ".svg":
+                try:
+                    result.append(f.read_bytes())
+                except Exception:
+                    pass
+                continue
+
+            pixmap = QPixmap(str(f))
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    win_w, win_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                result.append(scaled)
+        return result
+
+    # ---- 主动休眠（切换睡眠图组，与定时休眠并行） ----
+
+    def set_manual_sleep(self, sleeping: bool) -> None:
+        """设置/解除主动休眠。
+
+        生效期间桌宠显示 sleep 图组（assets/sleep）；
+        与定时休眠（按时间表）相互独立，任一生效即显示睡眠图组。
+
+        Args:
+            sleeping: True 进入主动休眠，False 解除。
+        """
+        old = self._manual_sleeping
+        self._manual_sleeping = sleeping
+        if old != sleeping:
+            # 状态变化：立即切换图组并重置索引
+            self._current_image_index = 0
+            if sleeping and self._sleep_images:
+                self._set_pet_pixmap(self._sleep_images[0])
+            elif not sleeping and not self._is_sleeping and self._default_images:
+                # 仅当定时休眠也不在生效时才回到默认图组
+                self._set_pet_pixmap(self._default_images[0])
+
+    @property
+    def manual_sleeping(self) -> bool:
+        """当前是否处于主动休眠。"""
+        return self._manual_sleeping
+
+    def _check_day_night(self) -> bool:
+        """根据当前时间和配置判断是否处于睡眠模式。
+
+        与 DayNightService._update_mode() 逻辑一致：
+        白天：wake_start_hour <= hour < sleep_start_hour
+        夜晚：其他情况。
+
+        Returns:
+            True 表示睡眠（夜晚）模式。
+        """
+        if not self._config:
+            return False
+        try:
+            cfg = self._config
+            if not cfg.sleep.enabled:
+                return False
+            from datetime import datetime
+            hour = datetime.now().hour
+            wake = int(cfg.sleep.wake_start_hour)
+            sleep = int(cfg.sleep.sleep_start_hour)
+            # 白天：wake <= hour < sleep
+            return not (wake <= hour < sleep)
+        except Exception:
+            return False
+
+    def _start_image_rotation(self) -> None:
+        """启动图片轮播定时器。"""
+        if self._image_switch_timer is not None:
+            self._image_switch_timer.stop()
+        self._image_switch_timer = QTimer(self)
+        self._image_switch_timer.timeout.connect(self._switch_to_next_image)
+        interval_ms = int(self._switch_interval * 1000)
+        self._image_switch_timer.start(interval_ms)
+
+    def _switch_to_next_image(self) -> None:
+        """切换到下一张图片，同时检测休眠状态变化。
+
+        休眠判定：主动休眠 或 定时休眠时段（任一生效即显示 sleep 图组）。
+        """
+        # 检查休眠状态变化（主动 + 定时合并判定）
+        was_sleeping = self._is_sleeping
+        self._is_sleeping = self._manual_sleeping or self._check_day_night()
+        if self._is_sleeping != was_sleeping:
+            # 休眠状态变化：切换图片组并重置索引
+            self._current_image_index = 0
+            if self._is_sleeping and self._sleep_images:
+                self._set_pet_pixmap(self._sleep_images[0])
+            elif not self._is_sleeping and self._default_images:
+                self._set_pet_pixmap(self._default_images[0])
+            # 若新列表为空，保持当前图片不变
+            return
+
+        # 选择当前活跃的图片列表
+        images = self._sleep_images if self._is_sleeping else self._default_images
+        if not images:
+            return
+        if len(images) <= 1:
+            return
+
+        self._current_image_index = (self._current_image_index + 1) % len(images)
+        self._set_pet_pixmap(images[self._current_image_index])
+
+    def _set_pet_pixmap(self, source: QPixmap | bytes | QMovie) -> None:
+        """设置宠物的显示图片，同时更新气泡位置。
+
+        支持 SVG bytes、QMovie（GIF 动画）和普通 QPixmap。
+        注意：不调用 adjustSize()，窗口为固定尺寸，标签在布局中自动填充。
+        """
+        if not self._pet_label:
+            return
+        self._pet_label.setText("")
+        self._pet_label.setStyleSheet("")
+        # SvgPetLabel.setPixmap 统一处理 bytes / QPixmap / QMovie
+        self._pet_label.setPixmap(source)
+        self._position_dialog()
+
+    # ---- 宠物图片加载 ----
+
     def _load_pet_image(self) -> None:
         """加载并显示宠物角色图片。
 
-        优先级：normal1_image → default_image → 内置 SVG（PET_DEFAULT_SVG）。
-        SVG 用 QSvgRenderer 矢量渲染；位图走 QPixmap 兜底。
-        内置 SVG 保证无任何图片文件时也有默认形象。
+        优先级：目录轮播 → 单文件兜底 → 内置 SVG。
+        先尝试从 default_image_dir / sleep_image_dir 加载图片列表，
+        若目录为空则回退到 normal1_image → default_image → 内置 SVG。
+        休眠判定：主动休眠 或 定时休眠时段（任一生效即用 sleep 图组）。
         """
+        # 0) 判断当前休眠状态（主动 + 定时合并）
+        self._is_sleeping = self._manual_sleeping or self._check_day_night()
+
+        # 1) 预加载图片列表
+        self._default_images = self._load_images_from_dir(self._default_image_dir)
+        self._sleep_images = self._load_images_from_dir(self._sleep_image_dir)
+
+        # 2) 选择当前活跃的图片列表
+        active_list = self._sleep_images if self._is_sleeping else self._default_images
+        if active_list:
+            self._current_image_index = 0
+            self._set_pet_pixmap(active_list[0])
+            return
+
+        # 3) 目录为空 — 回退到单文件兜底
         img_path = self._normal1_image or self._default_image
         path = Path(img_path) if img_path else None
         full_path: Path | None = None
         if path:
             if not path.is_absolute():
-                full_path = Path(__file__).resolve().parent.parent / path
+                full_path = self._plugin_root() / path
             else:
                 full_path = path
 
-        # 1) 优先 SVG 文件
+        # 3a) 优先 SVG 文件
         if full_path and full_path.suffix.lower() == ".svg" and full_path.exists():
             try:
                 with open(full_path, "rb") as f:
@@ -278,7 +558,7 @@ class PetWindow(QWidget):
             except Exception:
                 pass  # 读失败则继续尝试位图/内置
 
-        # 2) 位图文件兜底
+        # 3b) 位图文件兜底
         if full_path and full_path.exists() and full_path.suffix.lower() != ".svg":
             pixmap = QPixmap(str(full_path))
             if not pixmap.isNull():
@@ -293,7 +573,7 @@ class PetWindow(QWidget):
                 self._pet_label.adjustSize()
                 return
 
-        # 3) 内置 SVG（无文件依赖，始终可用）
+        # 3c) 内置 SVG（无文件依赖，始终可用）
         self._pet_label.setText("")
         self._pet_label.setStyleSheet("")
         self._pet_label.setPixmap(PET_DEFAULT_SVG)
@@ -497,15 +777,14 @@ class PetWindow(QWidget):
             self._dialog_box.hide_immediately()
 
     def position_chat_window_default(self, chat_window: QWidget) -> None:
-        """将聊天窗口定位到桌宠上下/左右（智能自适应）。
+        """将聊天窗口定位到桌宠上方或下方。
 
-        策略：上下空间充足且左右不足→垂直（上/下）；否则水平（左/右）。
-        垂直时水平居中对齐桌宠；水平时垂直居中对齐桌宠。
-        全部钳制到桌宠中心所在屏幕的可视区域。
+        策略：始终垂直布局（上/下），避免水平布局时互相遮挡。
+        水平居中对齐桌宠；全部钳制到桌宠中心所在屏幕的可视区域。
         """
         chat_w = chat_window.width()
         chat_h = chat_window.height()
-        placement, rect = self._compute_placement(chat_w, chat_h, prefer="auto", margin=10)
+        placement, rect = self._compute_placement(chat_w, chat_h, prefer="vertical", margin=10)
         chat_window.move(rect.topLeft())
 
     def move_chat_by_delta(self, chat_window: QWidget, delta: QPoint) -> None:
@@ -528,24 +807,22 @@ class PetWindow(QWidget):
         chat_window.move(x, y)
 
     def follow_move_chat(self, chat_window: QWidget, delta: QPoint) -> None:
-        """follow 模式下拖动桌宠时移动聊天窗口（方案1：拖动中实时调整）。
+        """follow 模式下拖动桌宠时移动聊天窗口。
 
-        目标布局：chat 贴靠近屏幕边框的一侧、pet 在 chat 内侧，两者不重叠。
+        目标布局：chat 在 pet 上方或下方，两者不重叠。
         步骤：
         1. 按 delta 平移 chat 保持相对位置（带屏幕钳制）
-        2. 基于当前 pet 位置用 _compute_placement 重新算 chat 最佳位置
-           （_compute_placement 水平方向已对调：优先把 chat 放靠近边框侧）
-        3. 若 chat 与 pet 重叠（pet 占了边框位导致 chat 被钳制到 pet 同侧），
-           则把 pet 推到 chat 内侧（chat 贴边框、pet 在内），允许 pet 跳动
+        2. 基于当前 pet 位置用 _compute_placement 垂直布局重新算 chat 最佳位置
+        3. 若 chat 与 pet 重叠，则把 pet 推到 chat 内侧，允许 pet 跳动
         """
         if not delta.isNull():
             # 先按 delta 平移保持相对位置（内部带屏幕钳制）
             self.move_chat_by_delta(chat_window, delta)
 
-        # 基于当前 pet 位置重新智能布局 chat（chat 贴靠近边框侧）
+        # 基于当前 pet 位置重新智能布局 chat（垂直：上/下）
         chat_w = chat_window.width()
         chat_h = chat_window.height()
-        placement, rect = self._compute_placement(chat_w, chat_h, prefer="auto", margin=10)
+        placement, rect = self._compute_placement(chat_w, chat_h, prefer="vertical", margin=10)
         chat_window.move(rect.topLeft())
 
         # 检测 pet 与 chat 是否重叠；重叠则把 pet 推到 chat 内侧
@@ -601,6 +878,7 @@ class PetWindow(QWidget):
     def reload_image(self) -> None:
         """重新加载宠物图片（例如配置更改后）。"""
         self._load_pet_image()
+        self._start_image_rotation()
 
     # ---- 透明度 ----
 
@@ -615,29 +893,125 @@ class PetWindow(QWidget):
         self._tray_manager = tray_manager
 
     def contextMenuEvent(self, event) -> None:
-        """右键桌宠时弹出与托盘一致的菜单。"""
+        """右键桌宠时弹出与托盘同款子菜单（含主题 QSS 美化）。"""
         if self._tray_manager is None:
             super().contextMenuEvent(event)
             return
         menu = QMenu(self)
+        # 应用与托盘一致的主题美化（背景/条目/选中态/分隔线）
+        try:
+            qss = self._tray_manager._menu_qss()
+            if qss:
+                menu.setStyleSheet(qss)
+        except Exception:
+            pass
         self._tray_manager.build_menu(menu, with_quit_confirm=True)
         menu.exec(event.globalPos())
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        """双击宠物窗口时切换聊天窗口开/关（已开则关、已关则开）。"""
+        """双击宠物窗口时切换调整大小模式（并取消挂起的单击信号）。"""
         if event.button() == Qt.MouseButton.LeftButton:
-            self.chat_toggled.emit()
+            # 取消双击第一次释放挂起的单击
+            if self._click_timer is not None and self._click_timer.isActive():
+                self._click_timer.stop()
+            self._toggle_resize_mode()
             event.accept()
         else:
             super().mouseDoubleClickEvent(event)
 
+    def paintEvent(self, event) -> None:
+        """绘制窗口：在调整大小模式下显示淡蓝色边框。"""
+        super().paintEvent(event)
+        if self._resize_mode:
+            painter = QPainter(self)
+            painter.setPen(QColor("#9EF6FF"))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
+
+    # ---- 调整大小模式 ----
+
+    def _toggle_resize_mode(self) -> None:
+        """切换调整大小模式。"""
+        if self._resize_mode:
+            self._exit_resize_mode()
+        else:
+            self._enter_resize_mode()
+
+    def _enter_resize_mode(self) -> None:
+        """进入调整大小模式：显示边框和 QSizeGrip。"""
+        self._resize_mode = True
+        # 添加右下角缩放手柄
+        if self._size_grip is None:
+            self._size_grip = QSizeGrip(self)
+            gs = 20
+            self._size_grip.setGeometry(
+                self.width() - gs, self.height() - gs, gs, gs
+            )
+            self._size_grip.setStyleSheet(
+                "QSizeGrip { background-color: rgba(158, 246, 255, 60); "
+                "border: 1px solid #9EF6FF; }"
+            )
+        self._size_grip.show()
+        self._size_grip.raise_()
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        """窗口大小变化时保持 1:1 宽高比，并更新 QSizeGrip 位置。"""
+        w = event.size().width()
+        h = event.size().height()
+        if w != h:
+            # 强制等比例：取较大边作为正方形边长
+            s = max(w, h)
+            self.resize(s, s)
+            return
+        super().resizeEvent(event)
+        if self._size_grip and self._resize_mode:
+            gs = 20
+            self._size_grip.setGeometry(
+                self.width() - gs, self.height() - gs, gs, gs
+            )
+        # 气泡位置也需要更新
+        self._position_dialog()
+
+    def _exit_resize_mode(self) -> None:
+        """退出调整大小模式：隐藏边框和手柄，保存新尺寸到配置。"""
+        self._resize_mode = False
+        if self._size_grip:
+            self._size_grip.hide()
+        self.update()
+        # 更新内部尺寸记录并持久化到配置
+        self._win_w = self.width()
+        self._win_h = self.height()
+        self._save_pet_size()
+        # 重新加载图片以适应新尺寸
+        self._default_images = self._load_images_from_dir(self._default_image_dir)
+        self._sleep_images = self._load_images_from_dir(self._sleep_image_dir)
+        if self._is_sleeping and self._sleep_images:
+            self._current_image_index = 0
+            self._set_pet_pixmap(self._sleep_images[0])
+        elif not self._is_sleeping and self._default_images:
+            self._current_image_index = 0
+            self._set_pet_pixmap(self._default_images[0])
+        self._position_dialog()
+
+    def _save_pet_size(self) -> None:
+        """将当前窗口尺寸保存到配置。"""
+        if not self._config:
+            return
+        try:
+            self._config.pet.pet_width = self.width()
+            self._config.pet.pet_height = self.height()
+        except Exception:
+            pass
+
     # ---- 鼠标拖拽 ----
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        """记录拖拽起始位置。"""
+        """记录拖拽起始位置和按下坐标（用于单击判定）。"""
         if event.button() == Qt.MouseButton.LeftButton and not self.CLICK_THROUGH:
             self._drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._press_global_pos = event.globalPosition().toPoint()
             event.accept()
         else:
             super().mousePressEvent(event)
@@ -666,7 +1040,39 @@ class PetWindow(QWidget):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        """释放鼠标时清除拖拽状态。"""
+        """释放鼠标时清除拖拽状态；未发生移动的左键释放判定为单击。
+
+        单击 → 触发 chat_toggled（切换聊天窗口开/关），取代菜单栏的聊天选项。
+        双击（调整大小模式）由 Qt 的双击事件序列处理：单击计时器在双击的
+        第二次 press 到达前不会超时，避免误触发。
+        """
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._press_global_pos is not None
+            and not self.CLICK_THROUGH
+        ):
+            # 位移在阈值内视为单击（拖拽超过阈值不算）
+            release_pos = event.globalPosition().toPoint()
+            moved = (release_pos - self._press_global_pos).manhattanLength()
+            if moved <= 4:
+                self._emit_single_click()
         self._drag_position = None
+        self._press_global_pos = None
         event.accept()
         super().mouseReleaseEvent(event)
+
+    def _emit_single_click(self) -> None:
+        """延迟发射单击信号（双击时取消，避免与调整大小模式冲突）。
+
+        Qt 事件序列：单击 = press/release；双击 = press/release/press/双击事件/release。
+        用 QApplication.doubleClickInterval 做延迟窗口，若期间来了双击则取消单击。
+        """
+        if self._click_timer is not None and self._click_timer.isActive():
+            # 已有待处理的单击（双击的第一次释放）→ 取消
+            self._click_timer.stop()
+            return
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(QApplication.doubleClickInterval())
+        self._click_timer.timeout.connect(self.chat_toggled.emit)
+        self._click_timer.start()

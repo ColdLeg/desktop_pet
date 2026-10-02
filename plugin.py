@@ -173,6 +173,7 @@ class DesktopPetAdapter(BaseAdapter):
         self._system_monitor_service: Any = None
         self._clipboard_service: Any = None
         self._screen_watcher_service: Any = None
+        self._bilibili_service: Any = None
         self._services_started: bool = False
 
         # --- TTS 播放器（GUI 线程创建，跨线程通过 out_queue 桥接） ---
@@ -194,6 +195,11 @@ class DesktopPetAdapter(BaseAdapter):
         else:
             self._config = DesktopPetConfig()
             logger.warning("No DesktopPetConfig found on plugin, using defaults")
+
+        # 检查插件是否启用
+        if self._config and not self._config.plugin.enabled:
+            logger.info("DesktopPetAdapter disabled by config (plugin.enabled = false), skipping start")
+            return
 
         # 按配置调整日志级别
         if self._config and self._config.plugin.print_all_logs:
@@ -394,7 +400,11 @@ class DesktopPetAdapter(BaseAdapter):
             # 连接托盘信号到 GUI 动作
             tray_manager.action_show.connect(pet_window.show)
             tray_manager.action_hide.connect(pet_window.hide)
-            tray_manager.action_quit.connect(app.quit)
+            # 退出流程：先通知 adapter 停止服务，再由 adapter 通知 GUI 退出
+            # 直接 app.quit() 会导致 asyncio 侧的服务（screen_watcher 等）未停止而报错
+            def _on_quit() -> None:
+                self._in_queue.put({"action": "shutdown"})
+            tray_manager.action_quit.connect(_on_quit)
 
             # 注入 TrayManager 给 PetWindow 以支持右键菜单
             pet_window.set_tray_manager(tray_manager)
@@ -482,6 +492,41 @@ class DesktopPetAdapter(BaseAdapter):
                     logger.exception("Failed to set show_chat_messages")
             tray_manager.action_toggle_show_messages.connect(_apply_show_messages)
 
+            # B 站弹幕开关（运行时切换）
+            def _apply_bilibili(enabled: bool) -> None:
+                try:
+                    if self._config and getattr(self._config, "bilibili", None):
+                        self._config.bilibili.enabled = bool(enabled)
+                        self._save_config()
+                        if enabled:
+                            self._start_bilibili()
+                        else:
+                            self._stop_bilibili()
+                        logger.info(f"Bilibili danmaku set to: {enabled}")
+                except Exception:
+                    logger.exception("Failed to toggle bilibili")
+            tray_manager.action_toggle_bilibili.connect(_apply_bilibili)
+
+            # 主动休眠开关（与定时休眠并行；休眠期间 screen_watcher 不截图 + 桌宠显示 sleep 图组）
+            def _apply_manual_sleep(sleeping: bool) -> None:
+                try:
+                    svc = self._screen_watcher_service
+                    if svc is None:
+                        logger.warning("screen_watcher not started, manual sleep ignored")
+                    else:
+                        svc.set_manual_sleep(bool(sleeping))
+                    # 桌宠同步切换睡眠图组（assets/sleep）
+                    pet_window.set_manual_sleep(bool(sleeping))
+                    logger.info(f"Manual sleep set to: {sleeping}")
+                except Exception:
+                    logger.exception("Failed to toggle manual sleep")
+            tray_manager.action_toggle_manual_sleep.connect(_apply_manual_sleep)
+            # 菜单勾选态查询：从 screen_watcher 读主动休眠运行时状态
+            tray_manager._manual_sleep_getter = lambda: bool(
+                self._screen_watcher_service is not None
+                and self._screen_watcher_service.manual_sleeping
+            )
+
             # 连接聊天窗口打开信号（显示前先定位）
             def _position_and_show_chat() -> None:
                 # 若启用持久化偏移且偏移非零，按 pet_global + offset 定位
@@ -542,12 +587,10 @@ class DesktopPetAdapter(BaseAdapter):
             def _on_visibility_changed(visible: bool) -> None:
                 if visible:
                     self._chat_visible.set()
-                    # 加速 pet 当前输出并 copy 文本到 chat
+                    # 加速 pet 当前输出（不复制文本到 chat：load_history 稍后会
+                    # 从 DB 渲染同一条消息，复制会导致重复气泡）
                     dialog_box = getattr(pet_window, "_dialog_box", None)
                     if dialog_box is not None and dialog_box.is_outputting():
-                        cur_text = dialog_box.current_text
-                        if cur_text:
-                            chat_window.append_message("bot", cur_text)
                         dialog_box.accelerate_hide()
                     # 请求历史回读（异步）
                     self._request_chat_history()
@@ -756,6 +799,24 @@ class DesktopPetAdapter(BaseAdapter):
         while self._running:
             try:
                 msg = self._in_queue.get_nowait()
+                # 处理 GUI 发起的关闭请求：先停止服务，再通知 GUI 退出
+                if isinstance(msg, dict) and msg.get("action") == "shutdown":
+                    logger.info("Shutdown requested from GUI, stopping services...")
+                    # 清理 system reminder
+                    try:
+                        store = get_system_reminder_store()
+                        for name in ("desktop_pet_identity", "desktop_pet_user_qq", "desktop_pet_tts_hint"):
+                            try:
+                                store.delete(bucket=SystemReminderBucket.ACTOR, name=name)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # 停止服务
+                    await self._stop_services()
+                    # 通知 GUI 线程退出
+                    self._out_queue.put({"action": "quit"})
+                    break
                 await self._forward_to_core(msg)
             except queue.Empty:
                 await asyncio.sleep(0.1)
@@ -899,6 +960,9 @@ class DesktopPetAdapter(BaseAdapter):
 
         在 _context_clear_lock 内完成 DB 查询 + 消息处理 + 入队，
         确保「查询-入队」与「清屏-排空队列」互斥，消除竞态窗口。
+
+        查询结果为空时也发送 load_chat_history（空列表）——chat_window
+        侧会对空列表执行清屏，防止残留气泡与新消息叠加出重复。
         """
         try:
             from src.core.managers.stream_manager import get_stream_manager
@@ -919,10 +983,8 @@ class DesktopPetAdapter(BaseAdapter):
                         msgs = await result
                     else:
                         msgs = result
-                    if not msgs:
-                        return
                     history: list[dict[str, Any]] = []
-                    for m in msgs:
+                    for m in (msgs or []):
                         # 字段名按主程序 Messages 表结构
                         role = "bot" if getattr(m, "sender_role", "") == "bot" else "user"
                         content = getattr(m, "processed_plain_text", None) or getattr(m, "content", "") or getattr(m, "text", "") or ""
@@ -938,8 +1000,8 @@ class DesktopPetAdapter(BaseAdapter):
                         if not content.strip():
                             continue
                         history.append({"role": role, "text": content, "reply_to": ""})
-                    if history:
-                        self._out_queue.put({"action": "load_chat_history", "messages": history})
+                    # 无论是否为空都发送：空列表触发 chat_window 清屏
+                    self._out_queue.put({"action": "load_chat_history", "messages": history})
             except Exception:
                 logger.exception("Failed to fetch stream messages")
                 return
@@ -1276,8 +1338,27 @@ class DesktopPetAdapter(BaseAdapter):
             await self._clipboard_service.stop()
         if self._screen_watcher_service:
             await self._screen_watcher_service.stop()
+        await self._stop_bilibili()
         self._services_started = False
         logger.info("All services stopped")
+
+    def _start_bilibili(self) -> None:
+        """启动 B 站弹幕服务（异步，通过 event loop 调度）。"""
+        if self._bilibili_service is not None:
+            return
+        from .services.bilibili_service import BilibiliService
+        self._bilibili_service = BilibiliService(self)
+        if self._loop is not None:
+            self._loop.create_task(self._bilibili_service.start())
+            logger.info("Bilibili service start scheduled")
+
+    async def _stop_bilibili(self) -> None:
+        """停止 B 站弹幕服务。"""
+        if self._bilibili_service is None:
+            return
+        await self._bilibili_service.stop()
+        self._bilibili_service = None
+        logger.info("Bilibili service stopped")
 
 
 # ---- 插件注册 ----
