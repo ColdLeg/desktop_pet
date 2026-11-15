@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, cast
 from src.core.components.base import BaseService
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.prompt import (
-    SystemReminderBucket,
     SystemReminderConsumeType,
     SystemReminderInsertType,
     get_system_reminder_store,
@@ -57,12 +56,16 @@ class DayNightService(BaseService):
         self._update_mode()
 
     def _inject_reminder(self) -> None:
-        """把昼夜状态注入 actor system reminder。"""
+        """把昼夜状态注入桌宠流私有的 actor system reminder。
+
+        写入 stream:{stream_id}:actor 私有 bucket，仅桌宠聊天流的
+        chatter 可拾取，不干扰其他聊天流。
+        """
         try:
             store = get_system_reminder_store()
             content = "当前是白天" if self._mode == "day" else "当前是夜晚"
             store.set(
-                bucket=SystemReminderBucket.ACTOR,
+                bucket=self._stream_bucket(),
                 name="desktop_pet_day_night",
                 content=content,
                 insert_type=SystemReminderInsertType.DYNAMIC,
@@ -70,6 +73,19 @@ class DayNightService(BaseService):
             )
         except Exception:
             self._log.error("Failed to inject day_night reminder", exc_info=True)
+
+    def _stream_bucket(self) -> str:
+        """构造桌宠私聊流的私有 bucket key。
+
+        Returns:
+            形如 ``stream:{stream_id}:actor`` 的 bucket key。
+        """
+        from src.core.prompt import STREAM_BUCKET_PREFIX
+        from src.core.models.stream import ChatStream
+        cfg = self._get_config()
+        user_id = (cfg.chat.user_qq_id.strip() or "local_user") if cfg else "local_user"
+        stream_id = ChatStream.generate_stream_id(platform="desktop_pet", user_id=user_id)
+        return f"{STREAM_BUCKET_PREFIX}{stream_id}:actor"
 
     def _get_config(self) -> DesktopPetConfig | None:
         """从插件获取桌面宠物配置。"""

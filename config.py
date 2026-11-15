@@ -118,6 +118,12 @@ class DesktopPetConfig(BaseConfig):
             label="显示消息气泡",
             tag="general",
         )
+        show_emoji_in_chat: bool = Field(
+            default=True,
+            description="表情包优先显示在聊天窗口（即使「显示消息气泡」关闭），避免桌宠气泡一闪而过",
+            label="表情包显示在聊天窗口",
+            tag="general",
+        )
         user_qq_id: str = Field(
             default="",
             description="用户 QQ 号（填了用此 QQ 号作 user_id 隔离上下文，不填用 local_user）",
@@ -260,6 +266,99 @@ class DesktopPetConfig(BaseConfig):
             label="群聊 ID",
             tag="ai",
         )
+        vlm_max_retries: int = Field(
+            default=3,
+            description="识图模型请求失败后的最大重试次数（0 表示不重试）",
+            label="识图重试次数",
+            tag="performance",
+            ge=0,
+            le=10,
+        )
+        vlm_retry_delay: float = Field(
+            default=3.0,
+            description="识图重试的初始等待时间（秒），后续按指数退避递增",
+            label="识图重试间隔",
+            tag="timer",
+            ge=0.0,
+            le=60.0,
+        )
+        vlm_retry_backoff: float = Field(
+            default=2.0,
+            description="识图重试退避倍数（第 n 次重试等待 delay × backoff^(n-1)）",
+            label="退避倍数",
+            tag="performance",
+            ge=1.0,
+            le=5.0,
+        )
+        # ── 多帧连拍 + 变化筛选 + 拼图 ──
+        burst_enabled: bool = Field(
+            default=True,
+            description="启用多帧连拍 + 变化筛选 + 拼图识别（关闭则回到单张截图模式）",
+            label="启用多帧拼图",
+            tag="ai",
+        )
+        burst_frames: int = Field(
+            default=6,
+            description="每次 tick 连拍张数（2-12）",
+            label="连拍张数",
+            tag="performance",
+            ge=2,
+            le=12,
+        )
+        burst_interval: float = Field(
+            default=2.0,
+            description="连拍间隔（秒，0.5-10）",
+            label="连拍间隔",
+            tag="timer",
+            ge=0.5,
+            le=10.0,
+        )
+        change_threshold: float = Field(
+            default=12.0,
+            description="留帧的变化分阈值（0-255，与 dsh-see-now 同口径）；越高只留越大的变化",
+            label="变化阈值",
+            tag="performance",
+            ge=0.0,
+            le=255.0,
+        )
+        still_threshold: float = Field(
+            default=1.5,
+            description="低于此值判定画面静止，跳过本次识图（0 表示不跳过）",
+            label="静止阈值",
+            tag="performance",
+            ge=0.0,
+            le=255.0,
+        )
+        min_frames: int = Field(
+            default=2,
+            description="拼图最少帧数（变化帧不足时按分数从高到低补齐）",
+            label="最少帧数",
+            tag="performance",
+            ge=1,
+            le=12,
+        )
+        max_frames: int = Field(
+            default=6,
+            description="拼图最多帧数（超出时保留变化最大的若干帧，按时间顺序排列）",
+            label="最多帧数",
+            tag="performance",
+            ge=1,
+            le=12,
+        )
+        sheet_cell_width: int = Field(
+            default=640,
+            description="拼图单格目标宽度（像素）；高度按截图宽高比推导",
+            label="拼图单格宽度",
+            tag="performance",
+            ge=160,
+            le=1280,
+        )
+        skip_still: bool = Field(
+            default=True,
+            description="画面静止时跳过 VLM 调用（省 token）",
+            label="静止时跳过识图",
+            tag="performance",
+        )
 
     @config_section("tts", title="TTS 语音", tag="ai")
     class TTSSection(SectionBase):
@@ -275,6 +374,106 @@ class DesktopPetConfig(BaseConfig):
         mime_type: str = Field(default="audio/wav", description="TTS 音频 MIME 类型", label="音频格式", tag="ai")
         provider: str = Field(default="", description="TTS provider 名称（留空使用服务端默认 provider）", label="TTS Provider", tag="ai")
         volume: float = Field(default=0.8, description="TTS 语音播放音量（0.0~1.0）", label="音量", tag="general", ge=0.0, le=1.0, input_type="slider", step=0.05)
+        queue_max_items: int = Field(
+            default=8,
+            description="语音播放队列上限（超出时丢弃最早的待播语音，防止积压后连续轰炸）",
+            label="语音队列上限",
+            tag="performance",
+            ge=1,
+            le=50,
+        )
+        interrupt_on_new_reply: bool = Field(
+            default=False,
+            description="收到新的 bot 回复时是否清空未播完的语音队列（开启即打断当前播报）",
+            label="新回复打断播报",
+            tag="ai",
+        )
+
+    @config_section("voice_input", title="语音输入", tag="ai")
+    class VoiceInputSection(SectionBase):
+        """语音输入配置（录音 → ASR → 以用户名义发送）"""
+        enabled: bool = Field(
+            default=False,
+            description="启动时自动开启语音输入（也可通过托盘菜单随时开关）",
+            label="启用语音输入",
+            tag="ai",
+        )
+        device_name: str = Field(
+            default="",
+            description="麦克风设备名（留空使用系统默认输入设备）",
+            label="麦克风设备",
+            tag="general",
+        )
+        sample_rate: int = Field(
+            default=16000,
+            description="采样率（ASR 推荐 16000）",
+            label="采样率",
+            tag="performance",
+            ge=8000,
+            le=48000,
+        )
+        channels: int = Field(
+            default=1,
+            description="声道数（单声道即可）",
+            label="声道数",
+            tag="performance",
+            ge=1,
+            le=2,
+        )
+        silence_threshold: int = Field(
+            default=500,
+            description="静音判定阈值（RMS，0-32767）；环境噪声大时调高",
+            label="静音阈值",
+            tag="performance",
+            ge=0,
+            le=32767,
+        )
+        silence_sec: float = Field(
+            default=1.5,
+            description="连续静音多久判定一句话结束（秒）",
+            label="断句静音时长",
+            tag="timer",
+            ge=0.3,
+            le=10.0,
+        )
+        min_speech_sec: float = Field(
+            default=0.5,
+            description="短于此长度的语音片段直接丢弃（防噪声误触）",
+            label="最短语音时长",
+            tag="timer",
+            ge=0.1,
+            le=5.0,
+        )
+        max_record_sec: float = Field(
+            default=60.0,
+            description="单句最长录音时长（秒），超时强制断句",
+            label="单句最长录音",
+            tag="timer",
+            ge=5.0,
+            le=300.0,
+        )
+        silence_timeout: float = Field(
+            default=3.0,
+            description="识别完成后等待多久无新内容才投递（秒）",
+            label="投递等待时间",
+            tag="timer",
+            ge=0.5,
+            le=30.0,
+        )
+        send_as_user: bool = Field(
+            default=True,
+            description="以用户名义发送（关闭则作为系统提醒消息）",
+            label="以用户名义发送",
+            tag="ai",
+        )
+        asr_max_retries: int = Field(
+            default=2,
+            description="ASR 请求失败后的重试次数",
+            label="ASR 重试次数",
+            tag="performance",
+            ge=0,
+            le=5,
+        )
 
     @config_section("bilibili", title="B站直播", tag="ai")
     class BilibiliSection(SectionBase):
@@ -296,4 +495,5 @@ class DesktopPetConfig(BaseConfig):
     theme: ThemeSection = Field(default_factory=ThemeSection)
     screen_watcher: ScreenWatcherSection = Field(default_factory=ScreenWatcherSection)
     tts: TTSSection = Field(default_factory=TTSSection)
+    voice_input: VoiceInputSection = Field(default_factory=VoiceInputSection)
     bilibili: BilibiliSection = Field(default_factory=BilibiliSection)

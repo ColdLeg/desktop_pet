@@ -849,15 +849,19 @@ class ChatWindow(QWidget):
         """向消息历史追加一条消息气泡。
 
         当 show_chat_messages=False 时：
-        - 直接返回，不触发消息区构建（避免窗口展开）
+        - 普通文本消息直接返回，不触发消息区构建（避免窗口展开）
+        - 但携带表情/语音的消息仍然显示（表情包不应一闪而过）
         当 show_chat_messages=True 时正常追加气泡。
         """
-        if not self._show_messages:
+        if not self._show_messages and not emoji_bytes and not voice_bytes:
             return
         if not self._messages_built or self._messages_collapsed:
             if role == "system":
                 return
             self._ensure_messages_built()
+            # 输入栏模式下收到表情/语音：临时展开消息区，让媒体可见
+            if not self._show_messages:
+                self._animate_size(int(self.WIN_HEIGHT_FULL * self._scale))
 
         if role == "user":
             label = (

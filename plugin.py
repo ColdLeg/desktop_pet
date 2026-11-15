@@ -13,13 +13,14 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+from collections import deque
 from typing import Any
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BasePlugin, BaseAdapter
 from src.core.components.loader import register_plugin
 from src.core.prompt import (
-    SystemReminderBucket,
+    STREAM_BUCKET_PREFIX,
     SystemReminderConsumeType,
     SystemReminderInsertType,
     get_system_reminder_store,
@@ -31,6 +32,10 @@ from .config import DesktopPetConfig
 
 # 淡蓝色边框颜色（print_all_logs 开启时使用）
 _PANEL_BORDER_COLOR = "#9EF6FF"
+
+# 桌宠适配器支持的外发内容类型（供 action 的 associated_types 过滤使用）。
+# 注意：桌宠目前不支持 video，不要加入。
+_DESKTOP_PET_ACCEPT_FORMAT: list[str] = ["text", "image", "emoji", "voice"]
 
 
 class _BorderedLogger:
@@ -181,6 +186,24 @@ class DesktopPetAdapter(BaseAdapter):
         self._tts_audio_output = None
         self._tts_buffer = None  # 保持 QBuffer 引用防止 GC
 
+        # --- 语音输入（GUI 线程录音器 + asyncio 侧编排服务） ---
+        self._voice_recorder = None
+        self._voice_input_service: Any = None
+
+        # --- TTS 顺位播放队列（按序号串行播放，避免新语音截断旧语音） ---
+        # 请求侧（asyncio 线程）递增分配的序号
+        self._tts_seq_counter: int = 0
+        # GUI 线程：待播音频队列 / 乱序缓冲 / 期望的下一个序号
+        self._tts_queue: "deque[tuple[int, bytes]]" = deque()
+        self._tts_pending: dict[int, bytes] = {}
+        self._tts_next_seq: int = 0
+        self._tts_playing: bool = False
+        self._tts_dropped: int = 0
+        # 未分配序号的旧调用路径使用的兜底序号
+        self._tts_fallback_seq: int = 0
+        # 乱序缓冲看门狗：防止某条合成任务异常未回包导致队列永久卡住
+        self._tts_watchdog_timer = None
+
     # ---- 适配器生命周期 ----
 
     async def start(self) -> None:
@@ -216,53 +239,66 @@ class DesktopPetAdapter(BaseAdapter):
 
         logger.info("DesktopPetAdapter started")
 
-        # 注入桌宠身份 system reminder
+        # 桌宠私聊流 ID：reminder 写入该流的私有 bucket（stream:{stream_id}:actor），
+        # 仅本流的 chatter 可拾取，不干扰其他聊天流
+        stream_id = self._get_private_stream_id()
+
+        # 注入桌宠身份 system reminder（流私有，仅桌宠流可见）
         if self._config and self._config.chat.system_prompt.strip():
             try:
                 store = get_system_reminder_store()
                 store.set(
-                    bucket=SystemReminderBucket.ACTOR,
+                    bucket=f"{STREAM_BUCKET_PREFIX}{stream_id}:actor",
                     name="desktop_pet_identity",
                     content=self._config.chat.system_prompt,
                     insert_type=SystemReminderInsertType.FIXED,
                     consume=SystemReminderConsumeType.FOREVER,
                 )
-                logger.info("System reminder 'desktop_pet_identity' injected")
+                logger.info("System reminder 'desktop_pet_identity' injected (stream-private)")
             except Exception:
                 logger.exception("Failed to inject system reminder")
 
-        # 注入用户 QQ 号 system reminder
+        # 注入用户 QQ 号 system reminder（流私有）
         if self._config and self._config.chat.user_qq_id.strip():
             try:
                 store = get_system_reminder_store()
                 store.set(
-                    bucket=SystemReminderBucket.ACTOR,
+                    bucket=f"{STREAM_BUCKET_PREFIX}{stream_id}:actor",
                     name="desktop_pet_user_qq",
                     content=f"当前触发消息用户的 QQ 号是 {self._config.chat.user_qq_id.strip()}",
                     insert_type=SystemReminderInsertType.FIXED,
                     consume=SystemReminderConsumeType.FOREVER,
                 )
-                logger.info("System reminder 'desktop_pet_user_qq' injected")
+                logger.info("System reminder 'desktop_pet_user_qq' injected (stream-private)")
             except Exception:
                 logger.exception("Failed to inject user_qq system reminder")
 
-        # 注入 TTS 偏好 system reminder（仅在 TTS 启用时）
+        # 注入 TTS 偏好 system reminder（流私有，仅在 TTS 启用时）
         if self._config and getattr(self._config, "tts", None) and self._config.tts.enabled:
             try:
                 store = get_system_reminder_store()
                 store.set(
-                    bucket=SystemReminderBucket.ACTOR,
+                    bucket=f"{STREAM_BUCKET_PREFIX}{stream_id}:actor",
                     name="desktop_pet_tts_hint",
                     content="当前对话平台为桌面宠物，支持语音播放。在适合的场景下，请优先使用语音消息（调用 TTS 相关 action）与用户交流，让对话更自然生动。",
                     insert_type=SystemReminderInsertType.FIXED,
                     consume=SystemReminderConsumeType.FOREVER,
                 )
-                logger.info("System reminder 'desktop_pet_tts_hint' injected")
+                logger.info("System reminder 'desktop_pet_tts_hint' injected (stream-private)")
             except Exception:
                 logger.exception("Failed to inject TTS hint system reminder")
 
         # 调用父类启动（触发 on_adapter_loaded 钩子，启动健康检查）
         await super().start()
+
+        # 按配置自动开启语音输入
+        try:
+            vi = getattr(self._config, "voice_input", None) if self._config else None
+            if vi is not None and bool(getattr(vi, "enabled", False)):
+                self._start_voice_input()
+                logger.info("Voice input auto-started by config")
+        except Exception:
+            logger.exception("Failed to auto-start voice input")
 
         # 启动 in_queue 轮询任务
         tm = get_task_manager()
@@ -276,27 +312,15 @@ class DesktopPetAdapter(BaseAdapter):
         """停止适配器：停止服务、清理 system reminder、通知 GUI 线程退出。"""
         logger.info("DesktopPetAdapter stopping")
 
-        # 清理桌宠身份 system reminder
+        # 清理桌宠流私有的全部 reminder（按 stream:{stream_id}: 前缀，
+        # 对全局 bucket 无影响）
         try:
+            stream_id = self._get_private_stream_id()
             store = get_system_reminder_store()
-            store.delete(bucket=SystemReminderBucket.ACTOR, name="desktop_pet_identity")
-            logger.info("System reminder 'desktop_pet_identity' cleaned up")
+            store.clear_by_prefix(f"{STREAM_BUCKET_PREFIX}{stream_id}:")
+            logger.info(f"Stream-private reminders cleaned up for {stream_id[:12]}...")
         except Exception:
-            logger.exception("Failed to cleanup system reminder")
-
-        # 清理用户 QQ 号 system reminder
-        try:
-            store = get_system_reminder_store()
-            store.delete(bucket=SystemReminderBucket.ACTOR, name="desktop_pet_user_qq")
-        except Exception:
-            logger.exception("Failed to cleanup user_qq system reminder")
-
-        # 清理 TTS 偏好 system reminder
-        try:
-            store = get_system_reminder_store()
-            store.delete(bucket=SystemReminderBucket.ACTOR, name="desktop_pet_tts_hint")
-        except Exception:
-            logger.exception("Failed to cleanup TTS hint system reminder")
+            logger.exception("Failed to cleanup stream-private reminders")
 
         # 通知 GUI 线程退出
         self._out_queue.put({"action": "quit"})
@@ -310,6 +334,14 @@ class DesktopPetAdapter(BaseAdapter):
         self._tts_player = None
         self._tts_audio_output = None
         self._tts_buffer = None
+        # 清空语音队列，避免残留待播条目
+        self._tts_queue.clear()
+        self._tts_pending.clear()
+        self._tts_playing = False
+        self._cancel_tts_watchdog()
+        # 清理语音输入录音器引用（GUI 线程已退出，Qt 对象已销毁）
+        self._voice_recorder = None
+        self._voice_input_service = None
 
         # 取消 in_queue 轮询任务
         if self._in_queue_task_info:
@@ -344,6 +376,17 @@ class DesktopPetAdapter(BaseAdapter):
             "bot_name": "MoFox 桌宠",
             "platform": "desktop_pet",
         }
+
+    def _get_private_stream_id(self) -> str:
+        """获取桌宠私聊流 ID（与聊天/历史回读用同一 ID）。
+
+        Returns:
+            str: 形如 SHA-256 哈希的 stream_id；无配置时用 local_user 兜底。
+        """
+        from src.core.models.stream import ChatStream
+        cfg = self._config
+        user_id = (cfg.chat.user_qq_id.strip() or "local_user") if cfg else "local_user"
+        return ChatStream.generate_stream_id(platform="desktop_pet", user_id=user_id)
 
     # ---- GUI 线程管理 ----
 
@@ -527,6 +570,22 @@ class DesktopPetAdapter(BaseAdapter):
                 and self._screen_watcher_service.manual_sleeping
             )
 
+            # 语音输入开关（录音 → ASR → 以用户名义发送）
+            def _apply_voice_input(enabled: bool) -> None:
+                try:
+                    if enabled:
+                        self._start_voice_input()
+                    else:
+                        self._stop_voice_input()
+                    logger.info(f"Voice input set to: {enabled}")
+                except Exception:
+                    logger.exception("Failed to toggle voice input")
+            tray_manager.action_toggle_voice_input.connect(_apply_voice_input)
+            tray_manager._voice_input_getter = lambda: bool(
+                self._voice_input_service is not None
+                and self._voice_input_service.running
+            )
+
             # 连接聊天窗口打开信号（显示前先定位）
             def _position_and_show_chat() -> None:
                 # 若启用持久化偏移且偏移非零，按 pet_global + offset 定位
@@ -558,6 +617,10 @@ class DesktopPetAdapter(BaseAdapter):
             # 连接聊天窗口消息发送信号
             def _on_message_sent(text: str) -> None:
                 if text.strip():
+                    # 用户手动打字：取消待投递的语音缓冲，避免重复发送
+                    svc = self._voice_input_service
+                    if svc is not None:
+                        svc.cancel_pending("manual input")
                     self._in_queue.put({"text": text})
                     chat_window.append_message("user", text)
 
@@ -663,7 +726,10 @@ class DesktopPetAdapter(BaseAdapter):
                     self._tts_audio_output = QAudioOutput()
                     self._tts_audio_output.setVolume(float(self._config.tts.volume))
                     self._tts_player.setAudioOutput(self._tts_audio_output)
-                    logger.info("TTS player initialized")
+                    # 顺位播放：播完/出错时推进队列
+                    self._tts_player.mediaStatusChanged.connect(self._on_tts_media_status)
+                    self._tts_player.errorOccurred.connect(self._on_tts_error)
+                    logger.info("TTS player initialized (sequential queue playback)")
                 except ImportError:
                     logger.warning("PySide6.QtMultimedia not available, TTS playback disabled")
                 except Exception:
@@ -709,7 +775,10 @@ class DesktopPetAdapter(BaseAdapter):
                     import sys; from PySide6.QtWidgets import QApplication; QApplication.quit()
                     break
                 elif action == "show_dialog":
-                    pet_window.show_dialog(msg.get("text", ""))
+                    pet_window.show_dialog(
+                        msg.get("text", ""),
+                        msg.get("image_bytes", b"") or b"",
+                    )
                 elif action == "hide_dialog":
                     pet_window.hide_dialog()
                 elif action == "show_notification":
@@ -728,24 +797,205 @@ class DesktopPetAdapter(BaseAdapter):
                 elif action == "take_screenshot":
                     self._handle_take_screenshot(pet_window, msg.get("seq", 0))
                 elif action == "play_tts":
-                    self._play_tts_audio(msg.get("audio_data", b""))
+                    self._enqueue_tts_audio(
+                        msg.get("audio_data", b"") or b"",
+                        int(msg.get("seq", -1)),
+                    )
+                elif action == "flush_tts":
+                    self._flush_tts_queue(int(msg.get("next_seq", -1)))
+                elif action == "voice_record_start":
+                    self._start_voice_recorder(msg)
+                elif action == "voice_record_stop":
+                    self._stop_voice_recorder()
         except queue.Empty:
             pass
 
-    def _play_tts_audio(self, audio_data: bytes) -> None:
-        """在 GUI 线程中播放 TTS 音频字节（内存播放，无需临时文件）。
+    # ---- 语音输入录音器（GUI 线程内执行） ----
 
-        使用 QMediaPlayer + QBuffer 实现内存播放，避免写临时文件。
+    def _start_voice_recorder(self, msg: dict[str, Any]) -> None:
+        """在 GUI 线程创建并启动 VoiceRecorder。"""
+        try:
+            from .gui.voice_recorder import VoiceRecorder
+
+            if self._voice_recorder is None:
+                self._voice_recorder = VoiceRecorder()
+                self._voice_recorder.segment_ready.connect(self._on_voice_segment)
+                self._voice_recorder.error.connect(
+                    lambda e: logger.warning(f"Voice recorder error: {e}")
+                )
+            ok = self._voice_recorder.start(
+                device_name=str(msg.get("device_name", "") or ""),
+                sample_rate=int(msg.get("sample_rate", 16000)),
+                channels=int(msg.get("channels", 1)),
+                silence_threshold=int(msg.get("silence_threshold", 500)),
+                silence_sec=float(msg.get("silence_sec", 1.5)),
+                min_speech_sec=float(msg.get("min_speech_sec", 0.5)),
+                max_record_sec=float(msg.get("max_record_sec", 60.0)),
+            )
+            logger.info(f"Voice recorder {'started' if ok else 'failed to start'}")
+        except Exception:
+            logger.exception("Failed to start voice recorder")
+
+    def _stop_voice_recorder(self) -> None:
+        """停止并清理 VoiceRecorder。"""
+        try:
+            if self._voice_recorder is not None:
+                self._voice_recorder.stop()
+                logger.info("Voice recorder stopped")
+        except Exception:
+            logger.exception("Failed to stop voice recorder")
+
+    def _on_voice_segment(self, wav_bytes: bytes) -> None:
+        """GUI 线程收到一句完整录音 → 转交 asyncio 侧识别。
+
+        通过 _in_queue 回传（与现有 GUI→core 消息同一条通道），
+        由 ``_poll_in_queue`` 识别 action 后转给 VoiceInputService。
         """
-        if not audio_data or self._tts_player is None:
+        try:
+            self._in_queue.put({"action": "voice_audio", "wav_bytes": wav_bytes})
+        except Exception:
+            logger.exception("Failed to forward voice segment")
+
+    # ---- TTS 顺位播放队列（GUI 线程内执行） ----
+
+    def _cancel_tts_watchdog(self) -> None:
+        """取消看门狗定时器（序号正常推进后调用）。"""
+        if self._tts_watchdog_timer is None:
             return
+        try:
+            self._tts_watchdog_timer.stop()
+        except Exception:
+            pass
+        self._tts_watchdog_timer = None
+
+    def _tts_queue_limit(self) -> int:
+        """读取语音队列上限配置。"""
+        try:
+            if self._config and getattr(self._config, "tts", None):
+                return max(1, int(getattr(self._config.tts, "queue_max_items", 8) or 8))
+        except Exception:
+            pass
+        return 8
+
+    def _enqueue_tts_audio(self, audio_data: bytes, seq: int) -> None:
+        """接收一条待播语音，按序号串行入队播放。
+
+        序号由请求侧（asyncio 线程）在消息到达时分配，因此顺序与消息
+        到达顺序一致，不受各条 TTS 合成耗时不一致的影响：
+
+        - ``seq == _tts_next_seq``：就绪，直接入队，并连带取出乱序缓冲中
+          连续就绪的后续条目。
+        - ``seq > _tts_next_seq``：先存入乱序缓冲等待前序。
+        - ``seq < _tts_next_seq``（或 seq<0）：视为过期/重复，丢弃。
+
+        空音频（合成失败的占位）只推进序号，不占用播放队列。
+
+        Args:
+            audio_data: 音频字节；空 bytes 表示该序号合成失败。
+            seq: 消息顺序号；-1 表示调用方未分配（退化为主观 FIFO 追加）。
+        """
+        if self._tts_player is None:
+            return
+
+        # 未分配序号（旧调用路径）：用单调递增的兜底序号追加到队尾
+        if seq < 0:
+            self._tts_fallback_seq += 1
+            seq = max(self._tts_next_seq, self._tts_fallback_seq)
+            self._tts_fallback_seq = seq
+
+        if seq < self._tts_next_seq:
+            logger.debug(f"TTS seq={seq} 已过期（next={self._tts_next_seq}），丢弃")
+            return
+
+        if seq == self._tts_next_seq:
+            self._accept_tts_item(seq, audio_data)
+            # 连带处理乱序缓冲中已就绪的连续序号
+            while self._tts_next_seq in self._tts_pending:
+                nxt = self._tts_next_seq
+                buffered = self._tts_pending.pop(nxt)
+                self._accept_tts_item(nxt, buffered)
+            # 序号正常推进：若已无待处理条目则撤掉看门狗
+            if not self._tts_pending:
+                self._cancel_tts_watchdog()
+            else:
+                # 仍有缺口，重新计时
+                self._cancel_tts_watchdog()
+                self._arm_tts_watchdog()
+        else:
+            # 等待前序完成
+            self._tts_pending[seq] = audio_data
+            logger.debug(f"TTS seq={seq} 乱序到达，暂存（等待 {self._tts_next_seq}）")
+            self._arm_tts_watchdog()
+
+    def _arm_tts_watchdog(self) -> None:
+        """启动乱序缓冲看门狗：5 秒内序号仍未推进，则强制跳到 pending 最小序号。"""
+        if self._tts_watchdog_timer is not None:
+            return
+        try:
+            from PySide6.QtCore import QTimer
+        except ImportError:
+            return
+        self._tts_watchdog_timer = QTimer()
+        self._tts_watchdog_timer.setSingleShot(True)
+        self._tts_watchdog_timer.setInterval(5000)
+        self._tts_watchdog_timer.timeout.connect(self._on_tts_watchdog)
+        self._tts_watchdog_timer.start()
+
+    def _on_tts_watchdog(self) -> None:
+        """看门狗超时：若仍有等待前序的条目，强制从最小序号恢复推进。"""
+        self._tts_watchdog_timer = None
+        if not self._tts_pending:
+            return
+        smallest = min(self._tts_pending)
+        logger.warning(
+            f"TTS 看门狗触发：seq={self._tts_next_seq} 缺失，"
+            f"强制跳到 seq={smallest} 继续播放"
+        )
+        self._tts_next_seq = smallest
+        buffered = self._tts_pending.pop(smallest)
+        self._accept_tts_item(smallest, buffered)
+        while self._tts_next_seq in self._tts_pending:
+            nxt = self._tts_next_seq
+            buf = self._tts_pending.pop(nxt)
+            self._accept_tts_item(nxt, buf)
+        if self._tts_pending:
+            self._arm_tts_watchdog()
+
+    def _accept_tts_item(self, seq: int, audio_data: bytes) -> None:
+        """确认一个序号就绪：推进序号，非空音频入播放队列。"""
+        self._tts_next_seq = seq + 1
+        if not audio_data:
+            # 合成失败占位：只推进序号，不播放
+            logger.debug(f"TTS seq={seq} 无音频（合成失败），跳过")
+            return
+
+        limit = self._tts_queue_limit()
+        # 队列上限：丢弃最早待播条目（正在播的那条不受影响）
+        while len(self._tts_queue) >= limit:
+            dropped_seq, _ = self._tts_queue.popleft()
+            self._tts_dropped += 1
+            logger.warning(
+                f"TTS 队列已满（上限 {limit}），丢弃 seq={dropped_seq} "
+                f"（累计丢弃 {self._tts_dropped} 条）"
+            )
+
+        self._tts_queue.append((seq, audio_data))
+        logger.debug(f"TTS enqueued seq={seq}, {len(audio_data)} bytes, queue={len(self._tts_queue)}")
+
+        if not self._tts_playing:
+            self._start_next_tts()
+
+    def _start_next_tts(self) -> None:
+        """从队列取出下一条并播放。"""
+        if self._tts_player is None or self._tts_playing:
+            return
+        if not self._tts_queue:
+            return
+
+        seq, audio_data = self._tts_queue.popleft()
         try:
             from PySide6.QtCore import QBuffer, QIODevice
 
-            # 停止当前播放
-            self._tts_player.stop()
-
-            # 创建内存 buffer 存放音频数据
             buf = QBuffer()
             buf.setData(audio_data)
             buf.open(QIODevice.OpenModeFlag.ReadOnly)
@@ -753,13 +1003,72 @@ class DesktopPetAdapter(BaseAdapter):
             # 保持 buffer 引用防止提前 GC
             self._tts_buffer = buf
 
-            # 设置播放源并播放
             self._tts_player.setSourceDevice(buf)
             self._tts_player.play()
-
-            logger.debug(f"TTS playback started: {len(audio_data)} bytes")
+            self._tts_playing = True
+            logger.info(
+                f"TTS playing seq={seq}, {len(audio_data)} bytes, "
+                f"queue={len(self._tts_queue)}"
+            )
         except Exception:
-            logger.exception("Failed to play TTS audio")
+            logger.exception(f"Failed to play TTS audio (seq={seq})")
+            self._tts_playing = False
+            # 跳过坏条目，继续下一条
+            from PySide6.QtCore import QTimer as _QTimer
+            _QTimer.singleShot(0, self._start_next_tts)
+
+    def _on_tts_media_status(self, status: Any) -> None:
+        """QMediaPlayer 状态回调：播完/出错后自动推进队列。"""
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+        except ImportError:
+            return
+
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._tts_playing = False
+            logger.debug("TTS finished, advancing queue")
+            self._start_next_tts()
+        elif status in (
+            QMediaPlayer.MediaStatus.InvalidMedia,
+            QMediaPlayer.MediaStatus.NoMedia,
+        ):
+            if self._tts_playing:
+                self._tts_playing = False
+                logger.warning(f"TTS media invalid ({status}), skip and continue")
+                from PySide6.QtCore import QTimer as _QTimer
+                _QTimer.singleShot(0, self._start_next_tts)
+
+    def _on_tts_error(self, error: Any, error_string: str) -> None:
+        """QMediaPlayer 错误回调：避免单个坏文件卡死整条播放队列。"""
+        if not self._tts_playing:
+            return
+        logger.warning(f"TTS playback error: {error} {error_string}")
+        self._tts_playing = False
+        from PySide6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(0, self._start_next_tts)
+
+    def _flush_tts_queue(self, next_seq: int = -1) -> None:
+        """清空待播语音队列并停止当前播报（新回复打断播报时使用）。
+
+        Args:
+            next_seq: 发起 flush 的那条回复已分配的序号。flush 之后该序号
+                的音频随后到达，因此期望序号应重置为 next_seq（而非
+                _tts_seq_counter，后者可能已因后续消息继续递增导致误丢）。
+                -1 时回退到 _tts_seq_counter（旧行为）。
+        """
+        self._tts_queue.clear()
+        self._tts_pending.clear()
+        self._tts_next_seq = next_seq if next_seq >= 0 else self._tts_seq_counter
+        self._tts_playing = False
+        # 取消看门狗（队列已清空）
+        self._cancel_tts_watchdog()
+        # 停止正在播放的音频，实现"新回复打断"
+        try:
+            if self._tts_player is not None:
+                self._tts_player.stop()
+        except Exception:
+            logger.debug("Failed to stop TTS player during flush", exc_info=True)
+        logger.info(f"TTS queue flushed (next_seq={self._tts_next_seq})")
 
     def _handle_take_screenshot(self, pet_window, seq: int) -> None:
         """在 GUI 线程内执行截图，把 PNG 字节回传给等待的 Future。"""
@@ -802,14 +1111,11 @@ class DesktopPetAdapter(BaseAdapter):
                 # 处理 GUI 发起的关闭请求：先停止服务，再通知 GUI 退出
                 if isinstance(msg, dict) and msg.get("action") == "shutdown":
                     logger.info("Shutdown requested from GUI, stopping services...")
-                    # 清理 system reminder
+                    # 清理桌宠流私有 reminder（与 stop() 一致，按流前缀清理）
                     try:
+                        stream_id = self._get_private_stream_id()
                         store = get_system_reminder_store()
-                        for name in ("desktop_pet_identity", "desktop_pet_user_qq", "desktop_pet_tts_hint"):
-                            try:
-                                store.delete(bucket=SystemReminderBucket.ACTOR, name=name)
-                            except Exception:
-                                pass
+                        store.clear_by_prefix(f"{STREAM_BUCKET_PREFIX}{stream_id}:")
                     except Exception:
                         pass
                     # 停止服务
@@ -817,6 +1123,12 @@ class DesktopPetAdapter(BaseAdapter):
                     # 通知 GUI 线程退出
                     self._out_queue.put({"action": "quit"})
                     break
+                # 语音片段：转交 VoiceInputService 识别（不进核心消息管道）
+                if isinstance(msg, dict) and msg.get("action") == "voice_audio":
+                    svc = self._voice_input_service
+                    if svc is not None:
+                        svc.on_audio_segment(msg.get("wav_bytes", b"") or b"")
+                    continue
                 await self._forward_to_core(msg)
             except queue.Empty:
                 await asyncio.sleep(0.1)
@@ -873,9 +1185,18 @@ class DesktopPetAdapter(BaseAdapter):
             self._config and getattr(self._config, "chat", None)
             and getattr(self._config.chat, "show_chat_messages", False)
         )
-        target = "chat" if (self._chat_visible.is_set() and show_messages) else "pet"
+        # 表情包专用开关：即使 show_chat_messages=False，也优先塞进聊天窗口
+        show_emoji_in_chat = bool(
+            self._config and getattr(self._config, "chat", None)
+            and getattr(self._config.chat, "show_emoji_in_chat", True)
+        )
+        chat_visible = self._chat_visible.is_set()
+        to_chat = chat_visible and (
+            show_messages or (bool(emoji_bytes) and show_emoji_in_chat)
+        )
+        target = "chat" if to_chat else "pet"
         logger.info(f"_route_out_message -> {target}, role={role}, text={text[:50]!r}, emoji={len(emoji_bytes)}B, voice={len(voice_bytes)}B")
-        if self._chat_visible.is_set() and show_messages:
+        if to_chat:
             self._out_queue.put({
                 "action": "append_chat",
                 "role": role,
@@ -885,14 +1206,18 @@ class DesktopPetAdapter(BaseAdapter):
                 "voice_bytes": voice_bytes,
             })
         else:
-            # pet 气泡不支持图片/语音，降级为占位文本
+            # pet 气泡：支持表情图片；语音仍降级为占位文本
             display = text
             if not display:
                 if voice_bytes:
                     display = "[语音]"
                 elif emoji_bytes:
                     display = "[表情包]"
-            self._out_queue.put({"action": "show_dialog", "text": display})
+            self._out_queue.put({
+                "action": "show_dialog",
+                "text": display,
+                "image_bytes": emoji_bytes,
+            })
         if role == "error":
             logger.exception(text)
 
@@ -902,6 +1227,7 @@ class DesktopPetAdapter(BaseAdapter):
 
         支持的输入：
         - data URL: "data:image/gif;base64,XXXX"
+        - 规范化前缀: "base64|XXXX"（send_api 统一格式）
         - 纯 base64 字符串
         - 已解码的 bytes
 
@@ -913,19 +1239,29 @@ class DesktopPetAdapter(BaseAdapter):
         if not isinstance(data, str):
             return b""
         s = data.strip()
+        if not s:
+            return b""
+        import base64
+
         if s.startswith("data:"):
             # data URL 格式
             try:
                 _, b64 = s.split(",", 1)
-                import base64
                 return base64.b64decode(b64)
             except Exception:
+                logger.warning("Failed to decode emoji data URL")
                 return b""
-        # 纯 base64
+
+        # send_api 的规范化前缀：base64|<b64>
+        if s.startswith("base64|"):
+            s = s[len("base64|"):].strip()
+
         try:
-            import base64
             return base64.b64decode(s)
         except Exception:
+            logger.warning(
+                f"Failed to decode emoji base64 (len={len(s)}, head={s[:16]!r})"
+            )
             return b""
 
     @staticmethod
@@ -1103,6 +1439,10 @@ class DesktopPetAdapter(BaseAdapter):
                     platform="desktop_pet",
                     name="桌宠截图监控",
                 )
+                .format_info(
+                    content_format=["text"],
+                    accept_format=_DESKTOP_PET_ACCEPT_FORMAT,
+                )
                 .build()
             )
             # 在 envelope metadata 标记 source，便于 _send_platform_message 检测
@@ -1134,6 +1474,10 @@ class DesktopPetAdapter(BaseAdapter):
                 user_id=user_id,
                 platform="desktop_pet",
                 nickname=nickname,
+            )
+            .format_info(
+                content_format=["text"],
+                accept_format=_DESKTOP_PET_ACCEPT_FORMAT,
             )
             .build()
         )
@@ -1200,14 +1544,32 @@ class DesktopPetAdapter(BaseAdapter):
         # 路由到 chat_window 或 pet 气泡（voice_bytes 同时传给 chat 显示语音气泡）
         self._route_out_message(text, role="bot", reply_to=reply_to, emoji_bytes=emoji_bytes, voice_bytes=voice_bytes)
 
+        # 先分配本条回复的序号（无论走 voice 段还是自合成都要用）
+        needs_voice = bool(voice_bytes) or bool(
+            text and self._config and getattr(self._config, "tts", None)
+            and self._config.tts.enabled
+        )
+        tts_seq = self._next_tts_seq() if needs_voice else -1
+
+        # 可选：收到新回复时打断未播完的语音队列
+        # 关键：flush 消息携带本条回复的序号，GUI 侧据此重定位期望序号，
+        # 否则 flush 与 play_tts 之间会因 _tts_seq_counter 已递增而误丢新音频
+        if needs_voice and self._config and getattr(self._config, "tts", None) \
+                and bool(getattr(self._config.tts, "interrupt_on_new_reply", False)):
+            self._out_queue.put({"action": "flush_tts", "next_seq": tts_seq})
+
         # 播放 AI 生成的语音消息（来自 GenerateVoiceAction 等）
         if voice_bytes and self._loop is not None:
-            self._out_queue.put({"action": "play_tts", "audio_data": voice_bytes})
+            self._out_queue.put({
+                "action": "play_tts",
+                "audio_data": voice_bytes,
+                "seq": tts_seq,
+            })
 
         # 异步触发 TTS 合成（非阻塞，不延迟消息显示）
         # 如果已有 voice 音频（AI 已合成），跳过桌宠自己的 TTS 合成以避免双重音频
         if text and not voice_bytes and self._config and getattr(self._config, "tts", None) and self._config.tts.enabled and self._loop is not None:
-            self._loop.create_task(self._synthesize_and_queue_tts(text))
+            self._loop.create_task(self._synthesize_and_queue_tts(text, tts_seq))
 
         # 截图回复写回用户私聊 stream 历史
         if source == "screenshot" and text:
@@ -1243,11 +1605,25 @@ class DesktopPetAdapter(BaseAdapter):
 
     # ---- TTS 语音合成 ----
 
-    async def _synthesize_and_queue_tts(self, text: str) -> None:
-        """异步合成 TTS 语音，结果放入 out_queue 由 GUI 线程播放。
+    def _next_tts_seq(self) -> int:
+        """分配下一个语音播放序号（asyncio 线程调用）。
+
+        序号在消息到达时分配，因此播放顺序与消息到达顺序一致，
+        不受各条 TTS 合成耗时差异影响。
+
+        Returns:
+            单调递增的非负序号；TTS 未启用时返回 -1（不参与顺位排序）。
+        """
+        seq = self._tts_seq_counter
+        self._tts_seq_counter += 1
+        return seq
+
+    async def _synthesize_and_queue_tts(self, text: str, seq: int = -1) -> None:
+        """异步合成 TTS 语音，结果放入 out_queue 由 GUI 线程顺位播放。
 
         Args:
             text: 待合成的回复文本。
+            seq: 消息到达时分配的播放序号。
         """
         try:
             from .tts import synthesize_tts
@@ -1258,9 +1634,30 @@ class DesktopPetAdapter(BaseAdapter):
                 logger=logger,
             )
             if audio:
-                self._out_queue.put({"action": "play_tts", "audio_data": audio})
+                self._out_queue.put({
+                    "action": "play_tts",
+                    "audio_data": audio,
+                    "seq": seq,
+                })
+            else:
+                # 合成失败：仍发送占位，推进 GUI 侧序号，避免队列永久卡住
+                logger.warning(f"TTS synthesis returned empty (seq={seq})")
+                self._out_queue.put({
+                    "action": "play_tts",
+                    "audio_data": b"",
+                    "seq": seq,
+                })
         except Exception:
-            logger.exception("TTS synthesis failed")
+            logger.exception(f"TTS synthesis failed (seq={seq})")
+            # 异常同样发占位推进序号
+            try:
+                self._out_queue.put({
+                    "action": "play_tts",
+                    "audio_data": b"",
+                    "seq": seq,
+                })
+            except Exception:
+                pass
 
     # ---- 主动消息投递（供 services 调用） ----
 
@@ -1338,9 +1735,57 @@ class DesktopPetAdapter(BaseAdapter):
             await self._clipboard_service.stop()
         if self._screen_watcher_service:
             await self._screen_watcher_service.stop()
+        # 这里已经在 asyncio 线程：直接 await，确保停止完成后再继续卸载
+        svc = self._voice_input_service
+        self._voice_input_service = None
+        if svc is not None:
+            try:
+                await svc.stop()
+            except Exception:
+                logger.exception("Failed to stop voice input service")
         await self._stop_bilibili()
         self._services_started = False
         logger.info("All services stopped")
+
+    def _start_voice_input(self) -> None:
+        """启动语音输入服务（异步，通过 event loop 调度）。
+
+        注意：本方法在 **GUI 线程**（菜单回调）调用，必须用
+        ``call_soon_threadsafe`` 把 create_task 投递到 asyncio 线程，
+        否则会触发跨线程操作事件循环的未定义行为。
+        """
+        if self._voice_input_service is not None:
+            return
+        from .services.voice_input_service import VoiceInputService
+
+        self._voice_input_service = VoiceInputService(self)
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._loop.create_task, self._voice_input_service.start()
+            )
+            logger.info("Voice input service start scheduled")
+
+    def _stop_voice_input(self) -> None:
+        """停止语音输入服务（GUI 线程安全，异步执行）。
+
+        与 ``_start_voice_input`` 对称：把协程投递到 asyncio 线程执行。
+        调用方（菜单回调）无需也不应该 await。
+        """
+        svc = self._voice_input_service
+        if svc is None:
+            return
+        self._voice_input_service = None
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(self._loop.create_task, self._shutdown_voice_input(svc))
+
+    async def _shutdown_voice_input(self, svc: Any) -> None:
+        """在 asyncio 线程真正停止语音输入服务。"""
+        try:
+            await svc.stop()
+            logger.info("Voice input service stopped")
+        except Exception:
+            logger.exception("Failed to stop voice input service")
 
     def _start_bilibili(self) -> None:
         """启动 B 站弹幕服务（异步，通过 event loop 调度）。"""

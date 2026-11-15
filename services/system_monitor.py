@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, cast
 from src.core.components.base import BaseService
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.prompt import (
-    SystemReminderBucket,
     SystemReminderConsumeType,
     SystemReminderInsertType,
     get_system_reminder_store,
@@ -47,6 +46,15 @@ class SystemMonitorService(BaseService):
         if self.plugin and hasattr(self.plugin, "config"):
             return cast("DesktopPetConfig", self.plugin.config)
         return None
+
+    def _stream_bucket(self) -> str:
+        """构造桌宠私聊流的私有 bucket key（stream:{stream_id}:actor）。"""
+        from src.core.prompt import STREAM_BUCKET_PREFIX
+        from src.core.models.stream import ChatStream
+        cfg = self._get_config()
+        user_id = (cfg.chat.user_qq_id.strip() or "local_user") if cfg else "local_user"
+        stream_id = ChatStream.generate_stream_id(platform="desktop_pet", user_id=user_id)
+        return f"{STREAM_BUCKET_PREFIX}{stream_id}:actor"
 
     async def start(self) -> None:
         """如果配置中启用了监控，则启动监控循环。"""
@@ -92,12 +100,12 @@ class SystemMonitorService(BaseService):
                 if mem > mem_thresh:
                     self._log.warning(f"High memory: {mem:.1f}% (threshold: {mem_thresh:.1f}%)")
 
-                # 注入 system reminder（每次刷新，超阈值才注入）
+                # 注入 system reminder（每次刷新，超阈值才注入；写入桌宠流私有 bucket）
                 if cpu > cpu_thresh or mem > mem_thresh:
                     try:
                         store = get_system_reminder_store()
                         store.set(
-                            bucket=SystemReminderBucket.ACTOR,
+                            bucket=self._stream_bucket(),
                             name="desktop_pet_system_status",
                             content=f"系统状态：CPU {cpu:.1f}%，内存 {mem:.1f}%",
                             insert_type=SystemReminderInsertType.DYNAMIC,

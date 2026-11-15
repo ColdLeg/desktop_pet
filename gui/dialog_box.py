@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPropertyAnimation, QTimer, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .theme import get_font_family, get_font_size_scale, get_theme
@@ -36,6 +36,8 @@ class DialogBox(QWidget):
     MAX_WIDTH = 280
     TYPING_SPEED_MS = 45
     AUTO_HIDE_SEC = 10.0
+    # 表情图片在气泡内的最大边长（px，按字号缩放）
+    MAX_IMAGE_SIDE = 160
 
     def __init__(
         self,
@@ -73,6 +75,7 @@ class DialogBox(QWidget):
         self._hide_timer: QTimer | None = None
         self._fade_animation: QPropertyAnimation | None = None
         self._accelerated: bool = False
+        self._image_label: QLabel | None = None
 
         self._build_ui()
 
@@ -109,6 +112,14 @@ class DialogBox(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
+
+        # 表情图片（默认隐藏，仅在有图片时显示）
+        self._image_label = QLabel(self)
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setStyleSheet("background: transparent;")
+        self._image_label.hide()
+        layout.addWidget(self._image_label)
+
         layout.addWidget(self._label)
 
         self.adjustSize()
@@ -141,7 +152,39 @@ class DialogBox(QWidget):
     # ---- 公开 API ----
 
     def show_text(self, text: str) -> None:
-        """以打字机效果显示文本。"""
+        """以打字机效果显示文本（同时清除上一次的图片）。"""
+        self._clear_image()
+        self._show_text_internal(text)
+
+    def show_content(self, text: str, image_bytes: bytes = b"") -> None:
+        """显示文本 + 可选图片（表情包）。
+
+        图片加载失败时自动降级为纯文本，不影响打字机与自动隐藏逻辑。
+
+        Args:
+            text: 气泡文本；为空时仅显示图片。
+            image_bytes: 表情/图片字节（PNG/GIF/JPG 等）。
+        """
+        has_image = self._set_image(image_bytes)
+        if has_image and not text:
+            # 纯图片：跳过打字机，直接展示
+            self._stop_all_timers()
+            self._full_text = ""
+            self._current_index = 0
+            self._label.setText("")
+            self._label.hide()
+            self.show()
+            self.raise_()
+            self.adjustSize()
+            self._start_hide_timer()
+            return
+
+        # 文本（可能带图）
+        self._label.show()
+        self._show_text_internal(text)
+
+    def _show_text_internal(self, text: str) -> None:
+        """打字机显示文本的公共实现。"""
         self._stop_all_timers()
 
         self._full_text = text
@@ -158,6 +201,37 @@ class DialogBox(QWidget):
         else:
             self._label.setText(text)
             self.adjustSize()
+            # 无文本（或打字机关闭）时也要启动自动隐藏
+            if not text:
+                self._start_hide_timer()
+
+    # ---- 表情图片 ----
+
+    def _set_image(self, image_bytes: bytes) -> bool:
+        """加载并显示图片；返回是否成功。"""
+        if not image_bytes or self._image_label is None:
+            self._clear_image()
+            return False
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(image_bytes):
+            self._clear_image()
+            return False
+        max_side = max(32, int(self.MAX_IMAGE_SIDE * self._font_scale))
+        if pixmap.width() > max_side or pixmap.height() > max_side:
+            pixmap = pixmap.scaled(
+                max_side, max_side,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        self._image_label.setPixmap(pixmap)
+        self._image_label.show()
+        return True
+
+    def _clear_image(self) -> None:
+        """隐藏并清空图片。"""
+        if self._image_label is not None:
+            self._image_label.clear()
+            self._image_label.hide()
 
     def hide_with_fade(self, duration_ms: int = 400) -> None:
         """在指定毫秒数内淡出对话框。"""
@@ -182,6 +256,7 @@ class DialogBox(QWidget):
     def hide_immediately(self) -> None:
         """无动画立即隐藏对话框。"""
         self._stop_all_timers()
+        self._clear_image()
         self.setWindowOpacity(1.0)
         self.hide()
 
@@ -189,6 +264,11 @@ class DialogBox(QWidget):
     def current_text(self) -> str:
         """返回当前完整文本（用于跨窗口 copy）。"""
         return self._full_text
+
+    @property
+    def has_image(self) -> bool:
+        """当前气泡是否显示着图片。"""
+        return self._image_label is not None and self._image_label.isVisible()
 
     def is_outputting(self) -> bool:
         """是否正在打字机输出或等待隐藏。"""

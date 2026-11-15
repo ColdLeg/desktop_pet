@@ -51,6 +51,7 @@ class TrayManager(QObject):
     action_toggle_show_messages = Signal(bool)
     action_toggle_bilibili = Signal(bool)
     action_toggle_manual_sleep = Signal(bool)
+    action_toggle_voice_input = Signal(bool)
 
     # 硬编码托盘属性
     TOOLTIP = "MoFox 桌面宠物"
@@ -192,6 +193,14 @@ class TrayManager(QObject):
             lambda checked: self.action_toggle_manual_sleep.emit(checked)
         )
         petchat_menu.addAction(manual_sleep_act)
+        # 语音输入开关（录音 → ASR → 以用户名义发送）
+        voice_input_act = QAction("语音输入", petchat_menu)
+        voice_input_act.setCheckable(True)
+        voice_input_act.setChecked(self._current_voice_input())
+        voice_input_act.triggered.connect(
+            lambda checked: self.action_toggle_voice_input.emit(checked)
+        )
+        petchat_menu.addAction(voice_input_act)
 
         # 配色子菜单
         theme_menu = menu.addMenu("配色方案")
@@ -296,6 +305,16 @@ class TrayManager(QObject):
     def _current_manual_sleep(self) -> bool:
         """读取当前主动休眠状态（运行时状态，不落盘，从托盘管理器查询）。"""
         getter = getattr(self, "_manual_sleep_getter", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                pass
+        return False
+
+    def _current_voice_input(self) -> bool:
+        """读取当前语音输入状态（运行时状态，不落盘）。"""
+        getter = getattr(self, "_voice_input_getter", None)
         if callable(getter):
             try:
                 return bool(getter())

@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, cast
 from src.core.components.base import BaseService
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.prompt import (
-    SystemReminderBucket,
     SystemReminderConsumeType,
     SystemReminderInsertType,
     get_system_reminder_store,
@@ -66,6 +65,15 @@ class ClipboardWatcherService(BaseService):
         if self.plugin and hasattr(self.plugin, "config"):
             return cast("DesktopPetConfig", self.plugin.config)
         return None
+
+    def _stream_bucket(self) -> str:
+        """构造桌宠私聊流的私有 bucket key（stream:{stream_id}:actor）。"""
+        from src.core.prompt import STREAM_BUCKET_PREFIX
+        from src.core.models.stream import ChatStream
+        cfg = self._get_config()
+        user_id = (cfg.chat.user_qq_id.strip() or "local_user") if cfg else "local_user"
+        stream_id = ChatStream.generate_stream_id(platform="desktop_pet", user_id=user_id)
+        return f"{STREAM_BUCKET_PREFIX}{stream_id}:actor"
 
     async def start(self) -> None:
         """如果配置中启用了监控，则启动剪贴板监控循环。"""
@@ -119,7 +127,7 @@ class ClipboardWatcherService(BaseService):
                     try:
                         store = get_system_reminder_store()
                         store.set(
-                            bucket=SystemReminderBucket.ACTOR,
+                            bucket=self._stream_bucket(),
                             name="desktop_pet_clipboard",
                             content=f"[来源：剪贴板] 用户刚刚复制了内容：{display_text}",
                             insert_type=SystemReminderInsertType.DYNAMIC,

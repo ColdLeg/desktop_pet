@@ -765,10 +765,13 @@ class PetWindow(QWidget):
 
     # ---- 公开 API ----
 
-    def show_dialog(self, text: str) -> None:
-        """显示包含指定文本的对话气泡。"""
+    def show_dialog(self, text: str, image_bytes: bytes = b"") -> None:
+        """显示对话气泡（文本 + 可选表情图片）。"""
         if self._dialog_box:
-            self._dialog_box.show_text(text)
+            if image_bytes:
+                self._dialog_box.show_content(text, image_bytes)
+            else:
+                self._dialog_box.show_text(text)
             self._position_dialog()
 
     def hide_dialog(self) -> None:
